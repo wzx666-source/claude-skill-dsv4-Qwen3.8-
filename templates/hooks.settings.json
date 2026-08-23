@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/Users/王子轩/.claude/skills/qwen-dual-model/scripts/qwen_read_hook.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}
