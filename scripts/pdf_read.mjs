@@ -81,15 +81,18 @@ open(os.environ['TXTPATH'], 'w', encoding='utf-8').write(
 
   // 2) 含图页检测(注意:题目/论文 PDF 的图多为矢量,不能只看 p.images)
   let imgPages = [];
+  let totalPages = 0;
   try {
     const out = py(`
 import pdfplumber, os, json
 pdf = pdfplumber.open(os.environ['PDFPATH'])
 def has_drawing(p):
     return bool(p.images or p.curves or p.lines or p.rects)
-print(json.dumps([i + 1 for i, p in enumerate(pdf.pages) if has_drawing(p)]))
+print(json.dumps({'total': len(pdf.pages), 'pages': [i + 1 for i, p in enumerate(pdf.pages) if has_drawing(p)]}))
 `);
-    imgPages = JSON.parse(out.trim() || '[]');
+    const info = JSON.parse(out.trim() || '{}');
+    totalPages = info.total || 0;
+    imgPages = info.pages || [];
   } catch (e) {
     console.log('⚠️ 含图页检测失败: ' + e.message.slice(0, 150));
     return;
@@ -98,6 +101,11 @@ print(json.dumps([i + 1 for i, p in enumerate(pdf.pages) if has_drawing(p)]))
   if (!imgPages.length) {
     console.log('🖼️ 指定范围内未检测到含图页,文字已足够');
     return;
+  }
+  // 图密集 PDF:脚本只处理前 maxImgPages 页,提醒用户考虑开 Qwen 会话整体读
+  const ratio = totalPages > 0 ? imgPages.length / totalPages : 0;
+  if (ratio > 0.5 || imgPages.length > 8) {
+    console.log(`⚠️ 图密集 PDF:含图页 ${imgPages.length}/${totalPages}(占 ${Math.round(ratio * 100)}%)。逐页视觉描述成本高且无连续性,建议开 Qwen 会话直接 Read 整个 PDF(双开步骤见项目 CLAUDE.md)。本脚本仍处理前 ${maxImgPages} 页:`);
   }
   if (imgPages.length > maxImgPages) {
     console.log(`🖼️ 共 ${imgPages.length} 个含图页(第 ${imgPages.join(', ')} 页),超过上限 ${maxImgPages},仅处理前 ${maxImgPages} 页;其余可用 --pages 单独指定`);

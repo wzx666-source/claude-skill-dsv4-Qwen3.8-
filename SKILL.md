@@ -63,9 +63,27 @@ node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
 ## 初始化竞赛项目(init)
 
 1. 拷贝 `templates/CLAUDE.md` 为竞赛项目根目录的 `CLAUDE.md`(协议对全部会话生效)
-2. 可选:把 `templates/hooks.settings.json` 合并进项目 `.claude/settings.json`
-3. 跑自检:`node <skill>/scripts/self_test.mjs`,全部 ✅ 再开始比赛
-4. 提醒用户:图片存文件不粘贴;PDF 走 Qwen 会话(CC Switch 切百炼,双开)
+2. 创建桥接目录 `bridge/to_qwen/` 与 `bridge/to_ds/`(双开会话联动的文件信箱)
+3. 可选:把 `templates/hooks.settings.json` 合并进项目 `.claude/settings.json`
+4. 跑自检:`node <skill>/scripts/self_test.mjs`,全部 ✅ 再开始比赛
+5. 提醒用户:图片存文件不粘贴;PDF 优先 pdf_read,特殊情况双开 Qwen 会话
+
+## Qwen 会话提醒规则(主线会话必须遵守)
+
+遇到以下情况,**停下当前任务,按模板提醒用户开 Qwen 会话**(不硬扛):
+1. PDF 文字提取失败(扫描件);2. pdf_read 报"图密集 PDF"(含图页 >50% 或 >8 页);
+3. 用户粘贴图片到会话;4. 任务需要 Qwen 多轮连续讨论;5. Qwen API 连续失败 ≥2 次。
+
+提醒模板(替换 <...>):
+```
+⚠️ 这个任务建议开一个 Qwen 会话(本会话不受影响):
+1. 不用关本会话
+2. CC Switch → 切到「百炼」
+3. 新开终端,cd 到本项目目录,运行 claude —— 即 Qwen 会话
+4. 在 Qwen 会话里:读 <文件> / 讨论 <话题>(任务说明已写到 bridge/to_qwen/<任务>.md)
+5. 让它把结果存到 bridge/to_ds/<名字>.md
+6. 回本会话说「读 bridge/to_ds/<名字>.md」,我接着干
+```
 
 ## 用户习惯提示(每次 init 时告知)
 
