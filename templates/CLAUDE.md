@@ -26,6 +26,8 @@ node C:/Users/王子轩/.claude/skills/qwen-dual-model/scripts/qwen_review.mjs <
 | `latex` | 论文章节转 LaTeX 后、终稿编译前 |
 
 - 评审报告写进 `results/reviews/`;第一行"总体结论"判定:【高】级问题必须修复后才能进下一阶段
+- **闭环规则**:修复【高】级问题后,必须把修改后的产物再送一轮 review,直到无【高】级问题为止(自己修自己验收不算数)
+- 评审是协议驱动:子问题/章节产物完成即主动送审,不等待用户口令
 - 头脑风暴/第二意见:`node .../qwen_ask.mjs "<问题>" [--file <附件>...]`
 
 ## PDF 处理(优先 pdf_read.mjs,不用开 Qwen 会话)
