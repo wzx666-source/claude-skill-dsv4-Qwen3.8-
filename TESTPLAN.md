@@ -1,6 +1,6 @@
 # qwen-dual-model 功能测试方案
 
-**目的**:赛前验证 skill 全部功能可用,发现环境/配置问题。
+**目的**:验证 skill 全部功能可用,发现环境/配置问题。换机器、升级 skill、赛前都建议跑一遍。
 **预计耗时**:15-20 分钟(约 25 次 API 调用,费用 <1 元)。
 **通过标准**:除标注"可选"的项外全部 ✅。
 
@@ -14,7 +14,7 @@ node --version                          # ≥ 22.5
 python -c "import matplotlib,pdfplumber,pypdfium2; print('py deps OK')"
 # 生成全部测试素材
 python $SK/make_test_materials.py
-# 先跑自动自检(7 项)
+# 先跑自动自检(20 项,含翻转逻辑与 hook 两个方向)
 node $SK/self_test.mjs
 ```
 
@@ -53,6 +53,8 @@ node $SK/self_test.mjs
 | C4 | latex 检查 | `node $SK/qwen_review.mjs latex $T/broken_latex.tex` | 指出: `\frac{1}{2` 括号不配对、`\gama` 未定义、`\end{align` 缺右括号 |
 | C5 | --focus 关注点 | `node $SK/qwen_review.mjs review $T/flawed_derivation.md --focus "重点检查闭区间端点处理"` | 回答围绕端点处理展开 |
 | C6 | 参数校验 | ① 非法 mode ② 缺文件参数 | ①报"mode 必须是 review \| challenge \| recompute \| latex" ②报"至少给一个文件" |
+| C7 | **--context 领域背景** | 对同一份代码分别跑:`--context "Python 并发,关注竞态与锁粒度"` 与不带该参数 | 带 context 时评审聚焦竞态/锁;不带时给出通用评审意见。**两者判据应有可见差异** |
+| C8 | context 不污染 stdout | `node $SK/qwen_review.mjs review $T/flawed_derivation.md --context "x" 2>/dev/null \| head -1` | 首行仍是「总体结论:…」(banner 只走 stderr) |
 
 ## D. 自由咨询 qwen_ask.mjs
 
@@ -92,6 +94,18 @@ node $SK/self_test.mjs
 | G1 | CLAUDE.md 模板 | `cat $SK/../templates/CLAUDE.md` | 包含视觉/评审/PDF 三协议,脚本路径正确 |
 | G2 | hook 配置模板 | `jq -e . $SK/../templates/hooks.settings.json` | JSON 合法 |
 | G3 | init 演练(可选) | 新建测试项目目录 → 拷入 CLAUDE.md 模板 → 新开会话问"这是什么项目" | 会话遵守双模型协议;可顺手验证 E6 |
+
+## H. 评审角色翻转(v2 新增,核心机制)
+
+翻转逻辑本身由 self_test 自动覆盖(第 5/6/7 项),这里测**端到端**:
+
+| # | 测试点 | 命令 | 预期 |
+|---|---|---|---|
+| H1 | 默认方向 | `node $SK/qwen_review.mjs review $T/flawed_derivation.md` | stderr banner 显示「评审方: Qwen(百炼) / 驱动方 DeepSeek 不参与」 |
+| H2 | **翻转方向** | `DRIVER_PROVIDER=bailian node $SK/qwen_review.mjs review $T/flawed_derivation.md` | stderr banner 显示「评审方: DeepSeek (deepseek-v4-pro) / 驱动方 Qwen(百炼) 不参与」;评审结论仍能抓出硬伤 |
+| H3 | 含图自动落 flash | `DRIVER_PROVIDER=bailian node $SK/qwen_ask.mjs "这张图什么颜色" --file $T/solid_blue.png` | banner 显示 `deepseek-flash`(pro 是纯文本档,含图必须落 flash) |
+| H4 | Qwen 会话下 hook 让行 | `DRIVER_PROVIDER=bailian` 时用 E1 的 stdin 喂 hook | 输出 `{}`(让行,不绕回 Qwen 自己) |
+| H5 | 双开真实验证(可选) | CC Switch 切百炼 → 新终端 `claude` → 在该会话里跑 `qwen_review` | 评审方为 DeepSeek,且主会话的评审仍走 Qwen —— 两边都不自审自 |
 
 ## 测试后清理
 
