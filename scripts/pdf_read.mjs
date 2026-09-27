@@ -130,7 +130,7 @@ page.render(scale=${(150 / 72).toFixed(3)}).to_pil().save(os.environ['PNGPATH'])
         continue;
       }
       const q = question
-        || `这是 PDF 第 ${p} 页。详细描述这一页的全部图和表格:结构、坐标轴含义、数值、趋势、异常点、公式。信息尽量完整准确,供数学建模推理使用。`;
+        || `这是 PDF 第 ${p} 页。详细描述这一页的全部图和表格:结构、坐标轴含义、数值、趋势、异常点、公式。信息尽量完整准确,供后续推理使用。`;
       try {
         const ans = await callQwen([{ role: 'user', content: [imageBlock(png), { type: 'text', text: q }] }]);
         console.log(`\n===== 第 ${p} 页(图)=====\n${ans}`);
