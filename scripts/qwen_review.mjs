@@ -8,6 +8,9 @@
 //
 // 评审方自动翻转:本会话跑 DeepSeek → 评审走 Qwen;双开 Qwen 会话 → 评审走 DeepSeek。
 // 这样无论哪边当主模型,都不会退化成"自己审自己"。评审方打印在 stderr,stdout 首行仍是「总体结论:…」。
+// **档位由 mode 决定**(见 qwen_common.mjs 的 PROVIDERS.modeModels):翻转只决定"哪家厂商",
+// mode 决定"该厂商的哪一档"—— 例:DeepSeek 侧 review/challenge 走 v4-pro(GPQA 92.4)、
+// recompute 走 flash(Codeforces 3471)。
 //
 // --focus   指定本轮关注点(如 "--focus \"并发安全\"")
 // --context 补充领域背景,让评审按该领域的规范来判(如 "--context \"Rust 异步运行时,关注 Send/Sync 边界\""、
@@ -21,7 +24,10 @@ const MODES = {
 然后列出问题,每条格式:
 【高/中/低】<位置引用> <问题描述> → <修改建议>
 【高】= 会导致错误结论或明显缺陷,必须修;【中】= 建议修;【低】= 可选。
-不要客套;只基于材料本身判断,不要脑补材料中没有的内容。若确实问题很少,说明理由后给出最值得改进的 1-2 点。`,
+硬约束(防止流畅但无依据的判断流到人手里):
+- 每条问题必须能指到材料中的具体行号/位置;指不出位置的判断,降级为【低】或标注「无法定位」
+- 只基于材料本身判断,不要脑补材料中没有的内容
+不要客套。若确实问题很少,说明理由后给出最值得改进的 1-2 点。`,
   challenge: `你是对抗评审员。你的任务:假设以下工作的结论是错的、方案不是最优的,全力推翻它。
 第一行必须输出:总体结论:站得住 | 可被质疑 | 有硬伤
 然后给出:
@@ -31,9 +37,14 @@ const MODES = {
 只基于材料本身,不许客套。`,
   recompute: `你是独立复算员。对照给出的数据、公式/代码和"待验证结果",独立核算关键数值是否吻合。
 第一行必须输出:总体结论:吻合 | 有出入 | 无法验证
-然后:逐项列出你独立核算的过程与数值,标注与待验证结果的一致/不一致处;
-不一致时给出你认为正确的值或明确的复核建议。若材料不足以复算,明确说缺什么。
-不要沿用材料里的中间步骤,必须自己从头算。`,
+然后逐项列出,每项三项都要有:
+- 【核算过程】从原始数据出发的逐式演算步骤,写出代入的数值与中间结果(不许只给结论数字)
+- 【出处】该数值取自材料的哪一行/哪一节(给可核对的位置引用)
+- 【判定】与待验证结果一致 / 不一致(不一致时给出你认为正确的值)
+硬约束(复算是"流畅的错误答案不被察觉"的高危场景,必须自己给证据):
+- 无核算过程支撑的判断,一律判为「无法验证」并显式标注,不许给"看起来对"
+- 每一条结论都必须能指到材料中的具体位置;指不到就说明材料缺什么
+- 不要沿用材料里的中间步骤,必须自己从头算`,
   latex: `你是 LaTeX 与数学公式的审校员。检查以下材料:
 1. LaTeX 语法错误(命令拼写、环境配对、转义)
 2. 公式的数学正确性与符号前后一致性
@@ -76,11 +87,13 @@ try {
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userText },
   ];
-  const meta = reviewerMeta(messages);
-  console.error(`🔍 评审方: ${meta.label} (${meta.model})｜驱动方 ${meta.driverLabel} 不参与本次评审`
+  const meta = reviewerMeta(messages, { mode });
+  console.error(`🔍 评审方: ${meta.label} (${meta.model})｜按 ${mode} 档选模型`
+    + `｜驱动方 ${meta.driverLabel} 不参与本次评审`
     + (context ? `｜领域: ${context.slice(0, 40)}` : ''));
+  if (meta.caveat) console.error(`ℹ️ 存疑: ${meta.caveat}`);
   try {
-    console.log(await callReviewer(messages));
+    console.log(await callReviewer(messages, { mode }));
   } catch (e) {
     fail(e.message);
   }

@@ -5,9 +5,12 @@
 //   - **评审自动翻转**(callReviewer):评审方 = 非驱动方的那个厂商,独立性来自厂商差异。
 //     本会话跑 DeepSeek 时评审走 Qwen;双开 Qwen 会话时评审走 DeepSeek —— 无论哪边当主模型,
 //     都不会退化成"自己审自己"
+//   - **档位按 mode 分**(PROVIDERS.modeModels):翻转只决定"哪家厂商",mode 决定"该厂商的哪一档"。
+//     依据是跑分:DeepSeek 侧 Flash 赢代码/agent、Pro 赢知识/推理,不该"纯文本一律 pro"
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const CC_DIR = path.join(
   process.env.USERPROFILE || process.env.HOME || '.',
@@ -17,7 +20,13 @@ export const CC_SWITCH_DB = path.join(CC_DIR, 'cc-switch.db');
 
 /**
  * provider 注册表;id 与 CC Switch 数据库一致,API key 自动同步,无需硬编码。
- * textModel / visionModel 分开:DeepSeek 的 pro 档是纯文本,视觉要落在有原生视觉的 flash 上。
+ *
+ * 档位依据跑分(2026-09 数据,复核期限 2026-10-31):
+ *   DeepSeek V4.1-Flash 与 V4-Pro 已不是"快慢档"而是两个方向 ——
+ *     Flash 赢代码/agent: DeepSWE 74.2 vs 62.7、Codeforces 3471 vs 3348、Terminal-Bench 3.0 30.0 vs 11.8
+ *     Pro   赢知识/推理: GPQA 92.4 vs 90.9、HLE 42.7 vs 36.8
+ *   故按 mode 分档,而不是"纯文本一律 pro"。仅 Flash 有原生视觉(ViT)。
+ *   Qwen3.8-Max 是单一档位,四个 mode 同模型(视觉 MathVision 95.2 仍压过 Flash 的 BabyVision 89.6)。
  */
 export const PROVIDERS = {
   bailian: {
@@ -26,6 +35,12 @@ export const PROVIDERS = {
     endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
     textModel: 'qwen3.8-max',
     visionModel: 'qwen3.8-max',
+    modeModels: {
+      review: 'qwen3.8-max',      // PaperBench 93.0 / IFBench 82.8
+      challenge: 'qwen3.8-max',
+      recompute: 'qwen3.8-max',
+      latex: 'qwen3.8-max',
+    },
     envModel: 'QWEN_MODEL',
     envKey: 'QWEN_API_KEY',
   },
@@ -33,12 +48,52 @@ export const PROVIDERS = {
     id: '49e1a8fb-5953-40f0-afe5-f1c5fe5b747c',
     label: 'DeepSeek',
     endpoint: 'https://api.deepseek.com/v1/chat/completions',
-    textModel: 'deepseek-v4-pro',
-    visionModel: 'deepseek-flash',
+    textModel: 'deepseek-v4-pro',      // 默认档 = 知识/推理
+    agenticModel: 'deepseek-flash',    // 代码/agent 档
+    visionModel: 'deepseek-flash',     // 仅 Flash 有原生视觉
+    modeModels: {
+      review: 'deepseek-v4-pro',       // GPQA 92.4 / HLE 42.7
+      challenge: 'deepseek-v4-pro',
+      recompute: 'deepseek-flash',     // Codeforces 3471 / 逐式核算更依赖执行
+      latex: 'deepseek-v4-pro',
+    },
     envModel: 'DEEPSEEK_MODEL',
     envKey: 'DEEPSEEK_API_KEY',
   },
 };
+
+// ───────────────── 生成物档位(模型迭代通道的输出) ─────────────────
+// model_roster.json(事实)→ model_audit.mjs(推导)→ tiers.generated.json(生成物)→ 这里读取。
+// 下面的硬编码 modeModels 保留两个作用:① 生成物缺失/损坏时的**保底**;
+// ② model_audit 推导时的**基线意图**(tie-break 用,避免推荐自我引用)。
+const SKILL_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+export const TIERS_FILE = path.join(SKILL_ROOT, 'tiers.generated.json');
+
+/** 模块级读一次;**缺失/损坏一律静默回落硬编码** —— 生成物坏掉绝不影响主线 */
+function loadGeneratedTiers() {
+  try {
+    const j = JSON.parse(fs.readFileSync(TIERS_FILE, 'utf8'));
+    return j?.schema === 1 && j.providers ? j : null;
+  } catch { return null; }
+}
+const GENERATED = loadGeneratedTiers();
+
+/** 当前实际生效的档位与来源(供 model_audit / self_test 体检) */
+export function resolvedTiers() {
+  const providers = {};
+  for (const name of Object.keys(PROVIDERS)) {
+    const modeModels = {};
+    for (const mode of Object.keys(PROVIDERS[name].modeModels ?? {})) {
+      modeModels[mode] = pickModel(name, { mode });
+    }
+    providers[name] = { modeModels };
+  }
+  return {
+    source: GENERATED ? 'generated' : 'baseline',
+    generatedAt: GENERATED?.generatedAt ?? null,
+    providers,
+  };
+}
 
 // 向后兼容:旧调用方引用的常量(均指百炼 = 视觉通道)
 export const BAILIAN_PROVIDER_ID = PROVIDERS.bailian.id;
@@ -71,15 +126,49 @@ export function hasImageContent(messages = []) {
     && m.content.some(b => b && (b.type === 'image_url' || b.type === 'image')));
 }
 
-/** 选模型:环境变量 > 按是否含图选档 */
-export function pickModel(providerName, hasImages = false) {
+/**
+ * 选模型,优先级:环境变量 > 含图落视觉档 > 生成物 > 硬编码基线 > textModel。
+ * 第二参数是 options 对象(**旧签名是布尔 hasImages,已废弃**)。
+ */
+export function pickModel(providerName, { hasImages = false, mode = '' } = {}) {
   const p = PROVIDERS[providerName];
   if (process.env[p.envModel]) return process.env[p.envModel];
-  return hasImages ? p.visionModel : p.textModel;
+  if (hasImages) return p.visionModel;
+  return GENERATED?.providers?.[providerName]?.modeModels?.[mode]
+    || p.modeModels?.[mode] || p.textModel;
 }
 
-export function loadModel(providerName = 'bailian', hasImages = false) {
-  return pickModel(providerName, hasImages);
+export function loadModel(providerName = 'bailian', opts = {}) {
+  return pickModel(providerName, opts);
+}
+
+/**
+ * 档位别名探针记录 —— 提示由**实测量**驱动,不由新闻驱动。
+ *
+ * 背景:有厂商口径称 DeepSeek 自 2026-09-14 起把全部 V4-Pro 请求改由 V4.1-Flash 承接
+ * (直到 V4.1-Pro 发布)。若属实则落在 v4-pro 的档位实际由 Flash 服务,其 GPQA/HLE
+ * 的知识优势拿不到,modeModels 里 Pro/Flash 的分档就成了空操作。
+ *
+ * 实测(2026-09-28,self_test.mjs「溯源探针」读响应体回显的 model id):
+ *   v4-pro→deepseek-v4-pro / flash→deepseek-flash,两档回显不同 → 该重定向对本账号不成立,
+ *   分档实际生效。故 per-run 不再打印提示(避免每次评审都刷噪音)。
+ *
+ * 已知局限:探针读的是**服务端回报**的 model id,不是地面真值。网关若静默别名却回显
+ * 请求名,探针会被骗过。故结论口径是"本账号未观察到重定向",不是"已证伪"。
+ *
+ * 复核期限 2026-10-31:重跑 self_test.mjs;若届时实测变成 'aliased',
+ * 把 verdict 改成 'aliased' 即可让所有评审/咨询脚本重新打出提示。
+ */
+export const MODEL_ALIAS_PROBE = {
+  checkedAt: '2026-09-28',
+  verdict: 'distinct',   // 'distinct' = 分档生效 | 'aliased' = Pro 被重定向到 Flash
+  note: '2026-09-14 起有口径称 V4-Pro 请求被重定向至 V4.1-Flash;本账号 2026-09-28 实测未观察到',
+};
+
+/** 档位存疑提示:仅当实测确认为别名时才返回内容(默认静默) */
+export function modelCaveat(model) {
+  if (model !== 'deepseek-v4-pro' || MODEL_ALIAS_PROBE.verdict !== 'aliased') return '';
+  return `${MODEL_ALIAS_PROBE.note} → 此档知识优势可能不可得,跑 node scripts/self_test.mjs 溯源探针复核`;
 }
 
 /**
@@ -114,15 +203,18 @@ export function peerProviderName() {
 }
 
 /** 评审方元信息,供脚本打印「谁在评审」banner(写 stderr,不污染 stdout 的首行结论) */
-export function reviewerMeta(messages = []) {
+export function reviewerMeta(messages = [], { mode = '' } = {}) {
   const driver = activeProviderName();
   const name = driver === 'bailian' ? 'deepseek' : 'bailian';
   const hasImages = hasImageContent(messages);
+  const model = pickModel(name, { hasImages, mode });
   return {
     name,
     label: PROVIDERS[name].label,
-    model: pickModel(name, hasImages),
+    model,
     hasImages,
+    mode,
+    caveat: modelCaveat(model),
     driver,
     driverLabel: PROVIDERS[driver].label,
   };
@@ -142,10 +234,14 @@ export function classifyError(status, payload, providerName = 'bailian') {
 /**
  * 调指定 provider:失败自动重试(限流/5xx/网络),仍失败则抛出带修复提示的错误。
  * 超时 240s:百炼视觉接口延迟方差大(实测 10s~70s+),120s 会误杀慢调用
+ *
+ * mode       评审/咨询的 mode(决定走哪一档),见 PROVIDERS.modeModels
+ * returnMeta 返回 { content, model } 而非纯字符串;model 取自响应体回显,
+ *            是识别"别名/重定向"的唯一可靠手段(见 self_test.mjs 溯源探针)
  */
-export async function callModel(messages, { provider = 'bailian', model, timeoutMs = 240000, retries = 2 } = {}) {
+export async function callModel(messages, { provider = 'bailian', model, mode = '', timeoutMs = 240000, retries = 2, returnMeta = false } = {}) {
   if (!PROVIDERS[provider]) throw new Error(`未知 provider: ${provider}`);
-  const useModel = model || pickModel(provider, hasImageContent(messages));
+  const useModel = model || pickModel(provider, { hasImages: hasImageContent(messages), mode });
   const key = loadKey(provider);
   let lastErr = '';
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -161,7 +257,10 @@ export async function callModel(messages, { provider = 'bailian', model, timeout
         body: JSON.stringify({ model: useModel, messages }),
       });
       const j = await res.json().catch(() => ({}));
-      if (j.choices && j.choices[0]) return j.choices[0].message.content;
+      if (j.choices && j.choices[0]) {
+        const content = j.choices[0].message.content;
+        return returnMeta ? { content, model: j.model || useModel } : content;
+      }
       lastErr = classifyError(res.status, j, provider);
       if (res.status === 429 || res.status >= 500) {
         if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
@@ -189,7 +288,8 @@ export async function callQwen(messages, opts = {}) {
 /**
  * 评审通道:自动走「非驱动方」的厂商,保证是真第二意见而非自己审自己。
  * 驱动方=DeepSeek → 评审走 Qwen;驱动方=Qwen → 评审走 DeepSeek。
- * 含图时自动落到该厂商有视觉的档(DeepSeek→flash / Qwen→qwen3.8-max)。
+ * 档位由 opts.mode 决定(见 PROVIDERS.modeModels);含图一律落到该厂商有视觉的档。
+ * opts 会原样透传给 callModel,故 mode / returnMeta 均可用。
  */
 export async function callReviewer(messages, opts = {}) {
   const provider = peerProviderName();

@@ -1,6 +1,6 @@
 # qwen-dual-model 功能测试方案
 
-**目的**:验证 skill 全部功能可用,发现环境/配置问题。换机器、升级 skill、赛前都建议跑一遍。
+**目的**:赛前验证 skill 全部功能可用,发现环境/配置问题。
 **预计耗时**:15-20 分钟(约 25 次 API 调用,费用 <1 元)。
 **通过标准**:除标注"可选"的项外全部 ✅。
 
@@ -14,7 +14,7 @@ node --version                          # ≥ 22.5
 python -c "import matplotlib,pdfplumber,pypdfium2; print('py deps OK')"
 # 生成全部测试素材
 python $SK/make_test_materials.py
-# 先跑自动自检(20 项,含翻转逻辑与 hook 两个方向)
+# 先跑自动自检(7 项)
 node $SK/self_test.mjs
 ```
 
@@ -53,8 +53,11 @@ node $SK/self_test.mjs
 | C4 | latex 检查 | `node $SK/qwen_review.mjs latex $T/broken_latex.tex` | 指出: `\frac{1}{2` 括号不配对、`\gama` 未定义、`\end{align` 缺右括号 |
 | C5 | --focus 关注点 | `node $SK/qwen_review.mjs review $T/flawed_derivation.md --focus "重点检查闭区间端点处理"` | 回答围绕端点处理展开 |
 | C6 | 参数校验 | ① 非法 mode ② 缺文件参数 | ①报"mode 必须是 review \| challenge \| recompute \| latex" ②报"至少给一个文件" |
-| C7 | **--context 领域背景** | 对同一份代码分别跑:`--context "Python 并发,关注竞态与锁粒度"` 与不带该参数 | 带 context 时评审聚焦竞态/锁;不带时给出通用评审意见。**两者判据应有可见差异** |
-| C8 | context 不污染 stdout | `node $SK/qwen_review.mjs review $T/flawed_derivation.md --context "x" 2>/dev/null \| head -1` | 首行仍是「总体结论:…」(banner 只走 stderr) |
+| C7 | **档位分派:recompute→flash** | `DRIVER_PROVIDER=bailian node $SK/qwen_review.mjs recompute $T/data.csv $T/wrong_result.md 2>&1 >/dev/null \| head -1` | stderr banner 含 `DeepSeek (deepseek-flash)｜按 recompute 档选模型` |
+| C8 | **档位分派:review→pro** | `DRIVER_PROVIDER=bailian node $SK/qwen_review.mjs review $T/flawed_derivation.md 2>&1 >/dev/null \| head -1` | banner 含 `DeepSeek (deepseek-v4-pro)`;第 2 行含存疑提示或为空(取决于 `MODEL_ALIAS_PROBE.verdict`) |
+| C9 | 环境变量仍覆盖 mode 分档 | `DRIVER_PROVIDER=bailian DEEPSEEK_MODEL=deepseek-flash node $SK/qwen_review.mjs review $T/flawed_derivation.md 2>&1 >/dev/null \| head -1` | banner 含 `deepseek-flash` 而非 pro(env 优先级高于 mode 档) |
+| C10 | **recompute 幻觉防护生效** | `DRIVER_PROVIDER=bailian node $SK/qwen_review.mjs recompute $T/data.csv $T/wrong_result.md` | 每项数值都带【核算过程】的逐式演算 **与**【出处】的位置引用;**只给结论数字、无过程 = 不通过** |
+| C11 | review 幻觉防护生效 | `DRIVER_PROVIDER=bailian node $SK/qwen_review.mjs review $T/flawed_derivation.md` | 每条问题都带可核对的位置引用;指不出位置的判断被降级为【低】或标注「无法定位」 |
 
 ## D. 自由咨询 qwen_ask.mjs
 
@@ -86,6 +89,7 @@ node $SK/self_test.mjs
 | F4 | 超大文本截断 | `node -e "import('$SK/qwen_common.mjs').then(m=>console.log(m.readTextCapped('$T/big_text.md').endsWith('字节]')?'TRUNCATED OK':'FAIL'))"` | 输出 TRUNCATED OK |
 | F5 | 连续调用稳定性 | `for i in 1 2 3; do node $SK/qwen_vision.mjs $T/solid_blue.png "什么颜色?" \| head -c 40; echo; done` | 3 次全部正常返回 |
 | F6 | 网络错误重试 | 断网或用防火墙临时屏蔽 `dashscope.aliyuncs.com` 后跑一次 vision | 报"网络请求失败…已重试 2 次",退出码非 0,机器不卡死 |
+| F7 | **溯源探针:V4-Pro 是否被重定向** | `node $SK/self_test.mjs`(看第 14 节「溯源探针」) | 打印两档服务端回显的 model id,并核对与 `MODEL_ALIAS_PROBE.verdict` 一致;两档回显相同 = 别名属实,分档当前是空操作 |
 
 ## G. 模板与 init 产物
 
@@ -95,17 +99,32 @@ node $SK/self_test.mjs
 | G2 | hook 配置模板 | `jq -e . $SK/../templates/hooks.settings.json` | JSON 合法 |
 | G3 | init 演练(可选) | 新建测试项目目录 → 拷入 CLAUDE.md 模板 → 新开会话问"这是什么项目" | 会话遵守双模型协议;可顺手验证 E6 |
 
-## H. 评审角色翻转(v2 新增,核心机制)
+## H. 模型迭代通道(model_roster.json / model_audit.mjs)
 
-翻转逻辑本身由 self_test 自动覆盖(第 5/6/7 项),这里测**端到端**:
+除 H7 外均不耗 token。跑前确认起点干净:`node $SK/model_audit.mjs` 退出码应为 0。
 
 | # | 测试点 | 命令 | 预期 |
 |---|---|---|---|
-| H1 | 默认方向 | `node $SK/qwen_review.mjs review $T/flawed_derivation.md` | stderr banner 显示「评审方: Qwen(百炼) / 驱动方 DeepSeek 不参与」 |
-| H2 | **翻转方向** | `DRIVER_PROVIDER=bailian node $SK/qwen_review.mjs review $T/flawed_derivation.md` | stderr banner 显示「评审方: DeepSeek (deepseek-v4-pro) / 驱动方 Qwen(百炼) 不参与」;评审结论仍能抓出硬伤 |
-| H3 | 含图自动落 flash | `DRIVER_PROVIDER=bailian node $SK/qwen_ask.mjs "这张图什么颜色" --file $T/solid_blue.png` | banner 显示 `deepseek-flash`(pro 是纯文本档,含图必须落 flash) |
-| H4 | Qwen 会话下 hook 让行 | `DRIVER_PROVIDER=bailian` 时用 E1 的 stdin 喂 hook | 输出 `{}`(让行,不绕回 Qwen 自己) |
-| H5 | 双开真实验证(可选) | CC Switch 切百炼 → 新终端 `claude` → 在该会话里跑 `qwen_review` | 评审方为 DeepSeek,且主会话的评审仍走 Qwen —— 两边都不自审自 |
+| H1 | 体检:无漂移 | `node $SK/model_audit.mjs` | 退出码 0;"✅ 无漂移";生成物与文档各一行 ✅ |
+| H2 | **推导重现手挑档位** | 同 H1 看表 | `recompute→deepseek-flash`,其余三档 →`deepseek-v4-pro`;Qwen 四档都 `qwen3.8-max`。**若不一致,不是 policy/跑分填错了,就是当初手挑错了** |
+| H3 | 跑分表渲染 | `node $SK/model_audit.mjs --render` | markdown 表;DeepSeek 表有"胜方"列,单模型的 Qwen 表**无**该列;分数保留 1 位小数(显示 93.0 而非 93),价格 2 位(0.60 非 0.6) |
+| H4 | 同步幂等 | `node $SK/model_audit.mjs --sync-docs` | 第二次跑报"共 0 处待更新";文件 mtime 不变 |
+| H5 | 标记块独占行 | `grep -n -A1 "ROSTER:bench-tables:begin" $SK/../SKILL.md` | 内容在标记块的**下一行**,不与 `-->` 同行——否则 Markdown 把该行当 HTML 块,表格渲染不出来 |
+| H6 | 生成物损坏 → 静默回落 + 报警 | `echo 'not json' > $SK/../tiers.generated.json`,跑 `node $SK/self_test.mjs \| grep 档位` 与 `node $SK/model_audit.mjs` | 档位断言**仍全 ✅**(回落硬编码基线,主线不受影响);但体检报 ❌ "生成物损坏"。`node $SK/model_audit.mjs --apply` 后恢复 |
+| H7 | 溯源探针 | `node $SK/model_audit.mjs --probe` | 逐条打印服务端回显的 model id;不一致标 ⚠️。**耗 token** |
+| H8 | **模拟新模型上线(端到端)** | 往 roster 的 `deepseek.models` 加 `deepseek-v9`(`hard_reasoning` 填 99),然后 H1 → `--apply` → `--sync-docs --write` → H1 | ① H1 报 drift 且退出码 1;② apply 后 H1 恢复 0;③ `SKILL.md`/`templates/CLAUDE.md`/全局 `CLAUDE.md` 的档位表**自动变成 deepseek-v9**;④ 还原后重跑 apply+sync |
+| H9 | 冻结拒绝写入 | roster 设 `"freezeUntil":"<明天>"`,改个分数让推荐变化,跑 `--apply`,再跑 `self_test.mjs` | `--apply` 报"冻结中,拒绝写入"且退出码 1;**漂移降级为 ⚠️ 而非 ❌**,self_test 不因此失败。测完清空 `freezeUntil` |
+| H10 | 标记块被破坏 → 拒绝盲写 | 把 SKILL.md 里某对标记复制一份(变成 2 对),跑 `--sync-docs` | 报"标记块出现次数异常…拒绝改写",退出码 1,**且不写入该文件**。测完还原 |
+| H11 | 生效档位不在 roster | 从 roster 删掉当前生效的 `deepseek-flash`,跑 `model_audit.mjs` 与 `self_test.mjs` | 报"生效档位不在 roster 中";self_test 该项 ❌。测完还原 |
+
+> ⚠️ H8–H11 会改 roster / 生成物 / 文档,**必须备份并还原**:
+> ```bash
+> cp $SK/../model_roster.json /tmp/roster.bak
+> # …测试…
+> cp /tmp/roster.bak $SK/../model_roster.json
+> node $SK/model_audit.mjs --apply && node $SK/model_audit.mjs --sync-docs --write
+> node $SK/self_test.mjs | tail -3   # 应恢复全 ✅
+> ```
 
 ## 测试后清理
 

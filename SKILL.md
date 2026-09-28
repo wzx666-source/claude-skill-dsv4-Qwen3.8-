@@ -1,6 +1,6 @@
 ---
 name: qwen-dual-model
-description: 双模型联动——Qwen 负责视觉(读图/PDF),评审与第二意见自动落到「非驱动方」的厂商(跨厂商真第二意见,一次调用,区别于 agent-review-panel 的多智能体深审)。含会话路由规则:默认 DeepSeek 会话,只在「连续多轮视觉精读」或「开题即知的硬骨头」时才开 Qwen 会话;中途难题不切会话。触发词——轻量档:看图、读图、识图、检查图、这张图、手写公式、第二意见、双模型、用 Qwen、视觉;重流程档:评审、评审一下、challenge、对抗评审、复算、复核数值、LaTeX 检查、该用哪个模型、开哪个会话。
+description: 双模型联动——Qwen 负责视觉(读图/PDF),评审与第二意见自动落到「非驱动方」的厂商(跨厂商真第二意见,一次调用,区别于 agent-review-panel 的多智能体深审);评审档位按 mode 分,跑分依据:代码/agent 走 deepseek-flash、知识推理走 deepseek-v4-pro。含会话路由规则:默认 DeepSeek 会话,只在「连续多轮视觉精读」「开题即知的硬骨头」「纯前端重头项目」时才开 Qwen 会话;中途难题不切会话。触发词——轻量档:看图、读图、识图、检查图、这张图、手写公式、第二意见、双模型、用 Qwen、视觉;重流程档:评审、评审一下、challenge、对抗评审、复算、复核数值、LaTeX 检查、该用哪个模型、开哪个会话;迭代档:模型升级、换模型、跑分更新、重新分档、迭代通道、新模型、model_roster。
 allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 ---
 
@@ -20,6 +20,77 @@ allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 
 > 视觉**固定**走 Qwen(口径统一,便于配图复核);评审/咨询**自动翻转**——理由见「评审角色翻转」。
 
+## 档位依据(跑分速查)
+
+**下表由 `model_roster.json` 推导生成,不要手改**——要改档位请走 [`MODEL_UPGRADE.md`](MODEL_UPGRADE.md) 的流程(填跑分 → `model_audit.mjs` → 生效 → 同步文档)。
+
+<!-- ROSTER:bench-tables:begin -->
+### DeepSeek:两档是两个方向,不是快慢档
+
+| 维度(基准) | V4-Pro | V4.1-Flash | 胜方 |
+|---|---|---|---|
+| 知识广度与深度 (GPQA Diamond) | **92.4** | 90.9 | V4-Pro |
+| 长尾硬推理 (HLE) | **42.7** | 36.8 | V4-Pro |
+| agent/仓库级编码 (DeepSWE v1.1) | 62.7 | **74.2** | V4.1-Flash |
+| 竞赛级算法 (Codeforces rating) | 3348 | **3471** | V4.1-Flash |
+| 视觉 (BabyVision) | — | 89.6 | V4.1-Flash |
+| 输出价 $/M | 1.98 | **0.60** | 便宜:V4.1-Flash |
+
+### Qwen(百炼)(单一候选,档位无需推导)
+
+| 维度(基准) | Qwen3.8-Max |
+|---|---|
+| 长尾硬推理 (HLE) | 43.6 |
+| agent/仓库级编码 (SWE-bench Pro) | 67.7 |
+| 指令遵循/格式 (IFBench) | 82.8 |
+| 论文级复现与评审 (PaperBench) | 93.0 |
+| 视觉 (MathVision) | 95.2 |
+| 输出价 $/M | 6.00 |
+
+> 数据来源:vendor=厂商自报(无独立复现)。
+> **复核期限 2026-10-31** —— 到期跑 `node scripts/model_audit.mjs` 并按 `MODEL_UPGRADE.md` 重分档。
+<!-- ROSTER:bench-tables:end -->
+
+→ **结论**:代码/agent 走 Flash,知识/推理走 Pro。故 `recompute` 落 Flash,`review`/`challenge`/`latex` 落 Pro。
+→ Qwen 在视觉维度领先(见上表 MathVision 95.2),故**「视觉固定走 Qwen」的结论不变**——现在是有数可依,不再只是"口径统一"。
+Flash 的 BabyVision 89.6 也够用,这正是"Qwen 挂了就放行原生 Read"这条退路成立的量化理由。
+
+### 背景细节(不参与路由推导,2026-09 快照)
+
+以下跑分**不进 roster、不影响档位推导**,只作背景参考——所以过期了也不影响正确性:
+
+- **Qwen3.8-Max**:LogicVista 91.9、Vision Arena 1301 Elo(第 2)、BabyVision 93.8、ERQA 78.3、
+  OSWorld-Verified 86.1、TerminalBench-2.1 86.6、QwenSWEBench V2 70.0、CoWorkBench 76.1、
+  JobBench 64.0、GDPval-AA 1739 Elo、`CodeArena(WebDev) 1691 号称全球第一`
+  ⚠️ 最后这条是**单一榜单口径,证据最弱** → 只用于一条严格限定的会话路由(见规则 ⑥)
+- **DeepSeek V4.1-Flash**:Terminal-Bench 2.1 90.6、Terminal-Bench 3.0/4.0 30.0/31.2、NL2Repo 65.4、
+  CyberGym 88.1、MathArena Apex 65.6、Chartography 78.9、ZeroBench-main 49.0
+- **第三方独立可比**(Artificial Analysis):V4.1-Flash 指数 40 / 约 $0.27 每任务;Qwen3.8-Max 指数 53→56 / 约 $1.14 每任务
+
+> **别名存疑(已实测)**:有厂商口径称 2026-09-14 起 V4-Pro 请求被重定向至 V4.1-Flash。
+> 本机 2026-09-28 用 `self_test.mjs` 的「溯源探针」读响应体回显的 model id 实测:
+> `v4-pro→deepseek-v4-pro` / `flash→deepseek-flash`,**两档回显不同,本账号未观察到重定向**,分档实际生效。
+> 局限:探针读的是服务端回报值,不是地面真值,静默别名会被骗过——所以口径是"未观察到",不是"已证伪"。复核期限同上。
+
+## 模型迭代通道(跑分更新后重分档)
+
+档位不是手挑的,是从 `model_roster.json` **推导**出来的。完整 SOP 见 [`MODEL_UPGRADE.md`](MODEL_UPGRADE.md):
+
+```bash
+SK=~/.claude/skills/qwen-dual-model/scripts
+# 1. 查跑分,填进 model_roster.json —— 唯一的人工步骤
+node $SK/model_audit.mjs                       # 2. 体检:推荐档位变没变 / 漂移 / 期限 / 冻结
+node $SK/model_audit.mjs --apply               # 3. 生效(冻结期会被拒绝)
+node $SK/model_audit.mjs --sync-docs --write   # 4. 同步文档标记块
+node $SK/self_test.mjs                         # 5. 全 ✅ 才算完成
+```
+
+- **档位表推不出来手改**:本文、`templates/*.md`、全局 `CLAUDE.md` 里的档位表都在 `<!-- ROSTER:... -->` 标记块内,由 `--sync-docs` 重写,手改会被下次同步覆盖
+- **推荐 = 该 mode 主维度的 argmax**(见 roster 的 `policy`),并列看副维度,**刻意不做加权评分**——权重会是拍脑袋的数字
+- **护栏**:`freezeUntil` 冻结档位(比赛/deadline 期间拒绝 `--apply`,且漂移不判失败);`recheckBy` 复核期限到期告警
+- **失效安全**:`tiers.generated.json` 缺失或损坏 → 运行时**静默回落**硬编码基线,主线不受影响
+- 临时想换档位试:用 `DEEPSEEK_MODEL` / `QWEN_MODEL` 环境变量覆盖(优先级最高),**别改 roster**
+
 ## 与其他评审类 skill 的分工(避免打架)
 
 | 要什么 | 用哪个 |
@@ -37,9 +108,14 @@ allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 判据不是"任务难不难",而是两条:**要不要长时间反复看像素**、**是不是开题就知道要连续多轮啃**。
 
 1. **默认开 DeepSeek 会话。** 例外只有第 2 条。
-2. **只在这两种情况开 Qwen 会话**:
+2. **只在以下三种情况开 Qwen 会话**:
    - 核心工作是连续多轮的视觉/PDF 精读(顶会论文精读、扫描件、通篇图表的 PDF)
    - 开题时就知道要连续多轮啃的硬骨头(而不是"做到一半才发现难")
+   - **开题即知、连续多轮、以 UI/前端为主**的项目(组件库 / 设计系统 / 纯前端 SPA)
+     - ✗ **排除**:前后端混合项目——仓库级改动是 DeepSeek 的强项(DeepSWE 74.2)
+     - 依据:Qwen `CodeArena(WebDev) 1691 号称全球第一`、`OSWorld-Verified 86.1`、`JobBench 64.0`;
+       **但这是单一榜单口径,证据弱于其他跑分**,故只在此窄场景生效
+     - 另见「成本与轮次」:Qwen 输出价是 Flash 的 10 倍,长程任务开 Qwen 会话要先掂量
 3. **中途遇到难题 → 不切会话。** 切会话会丢掉已建立的全部上下文,代价远大于收益;
    改用 `qwen_ask`(会诊)或 `qwen_review challenge`(对抗)。
    **注意这是"两个模型都要",比切过去只用一个更强。**
@@ -55,6 +131,7 @@ allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 | **编程** 全栈架构/复杂系统设计/课程设计/毕设/比赛项目 | DeepSeek 会话 + 架构定稿前 `challenge` | 长时间读仓库,切会话=丢上下文;质量靠 plan 纪律,不靠换模型 |
 | **编程** 深层 bug 排查/性能优化 | DeepSeek 会话 + `qwen_ask` 会诊 | 走到一半才发现难,切换成本最高;且更依赖 profiling 工具输出 |
 | **编程** 竞赛难题/复杂算法推导 | DeepSeek 主推 + `qwen_review challenge` | 两个模型都要,而不是二选一 |
+| **编程** 纯前端/UI 重头项目(组件库/设计系统/SPA) | **Qwen 会话**;前后端混合则留 DeepSeek | Qwen WebDev 榜单位居首位;但仓库级改动仍是 DeepSeek 强项(DeepSWE 74.2) |
 | **科研** 文献批量泛读/综述初稿/基础实验复现/写作初稿 | DeepSeek 会话 | 文字密集、便宜、迭代快 |
 | **科研** 顶会论文精读 / 含扫描件 | **Qwen 会话** | 连续多轮视觉判读 |
 | **科研** 实验改进 | DeepSeek 主推 + `challenge` | 同上,改的是代码与数据 |
@@ -68,12 +145,27 @@ allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 
 ## 评审角色翻转
 
-**评审方 = 非驱动方的那个厂商**,脚本自动判定,无需手动指定:
+**评审方 = 非驱动方的那个厂商**,脚本自动判定,无需手动指定。**翻转只决定"哪家厂商",`mode` 决定"该厂商的哪一档"**:
 
 | 驱动会话 | 评审/咨询方 | 用的档 |
 |---|---|---|
-| DeepSeek | Qwen(百炼) | `qwen3.8-max` |
-| Qwen(百炼) | DeepSeek | `deepseek-v4-pro`(纯文本评审);**含图时自动落 `deepseek-flash`** |
+| DeepSeek | Qwen(百炼) | `qwen3.8-max`(四个 mode 同一档) |
+| Qwen(百炼) | DeepSeek | **按 mode 分档**(见下表);**含图一律落 `deepseek-flash`** |
+
+mode 分档(两家的档位都由 `model_roster.json` 推导,别手改):
+
+<!-- ROSTER:mode-tiers:begin -->
+| mode | 档位(DeepSeek / Qwen) | 主维度 → 副维度 |
+|---|---|---|
+| `review` | `deepseek-v4-pro` / `qwen3.8-max` | hard_reasoning → knowledge |
+| `challenge` | `deepseek-v4-pro` / `qwen3.8-max` | hard_reasoning → knowledge |
+| `recompute` | `deepseek-flash` / `qwen3.8-max` | algo → code_agent |
+| `latex` | `deepseek-v4-pro` / `qwen3.8-max` | knowledge → instruction |
+
+> 由 `model_roster.json` 推导(roster@2026-09-28,复核期限 2026-10-31)。改档位请走 `MODEL_UPGRADE.md` 的流程,不要直接编辑本表。
+<!-- ROSTER:mode-tiers:end -->
+
+- **任意 mode + 含图 → `deepseek-flash`**:这是硬约束(仅 Flash 有原生视觉 ViT),不参与维度推导
 
 - 判定依据:CC Switch 的 `settings.json → currentProviderClaude`(数据库 `is_current` 兜底);识别失败按 DeepSeek 驱动处理
 - 可用环境变量 `DRIVER_PROVIDER=bailian|deepseek` 强制覆盖(测试用)
@@ -95,6 +187,9 @@ node <skill>/scripts/qwen_review.mjs review|challenge|recompute|latex <文件...
 
 # 自由咨询:会诊/头脑风暴/第二意见,咨询方自动翻转
 node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
+
+# 模型迭代通道:体检 / 生成配置 / 同步文档(仅模型升级时用,不耗 token;--probe 除外)
+node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write] | --probe]
 ```
 
 - **`--context` 很关键**:不给则按通用标准评审;给了就按该领域的规范判。
@@ -102,6 +197,8 @@ node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
   `--context "机器学习论文,关注消融实验是否充分"`、
   `--context "数学建模竞赛论文,关注模型创新性与摘要扣题"`
 - 评审输出第一行固定为「总体结论:…」,据此判定:【高】级问题必须修复后才进下一阶段
+- **`latex` mode 是编译的补充,不是替代**:确定性语法错误交给 `xelatex` 实际编译(编译器零幻觉),
+  模型只判编译器抓不到的**数学正确性与符号一致性**。两者都做,别只做模型检查
 - 评审报告落盘 `results/reviews/`,重要图的结论落盘 `results/fig_notes/`
 - 所有脚本自动从 CC Switch 数据库读对应厂商的 key(与 CC Switch 同步);`QWEN_API_KEY`/`QWEN_MODEL`/`DEEPSEEK_API_KEY`/`DEEPSEEK_MODEL` 可覆盖
 
@@ -137,6 +234,7 @@ node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
 3. `pdf_read` 报"图密集 PDF"(含图页 >50% 或 >8 页)
 4. 用户把图片直接粘贴到会话
 5. Qwen API 连续失败 ≥2 次
+6. 开题即知、连续多轮、以 UI/前端为主的项目(组件库 / 设计系统 / 纯前端 SPA;前后端混合不算)
 
 提醒模板(替换 <...>):
 ```
@@ -150,6 +248,32 @@ node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
 ```
 > 翻转后,该 Qwen 会话里的 `qwen_review` 会自动改由 DeepSeek 评审;主会话这边则仍由 Qwen 评审。
 > **不要为了"随手问一句"开 Qwen 会话**——单次提问用 `qwen_ask`。
+
+## 成本与轮次(决定"值不值得开 Qwen 会话")
+
+| | Qwen3.8-Max | DeepSeek V4.1-Flash |
+|---|---|---|
+| 输出价 | $6 / M | $0.60 / M(**1/10**) |
+| 输入价 | $2 / M | $0.15 / M(离峰) |
+| 每任务成本(AA 实测) | ~$1.14 | ~$0.27 |
+| 每任务轮次(AA 实测) | ~64 轮(上代 14 轮) | — |
+
+Artificial Analysis 实测 Qwen3.8-Max 每任务约 **64 轮 vs 上代 14 轮**、输入 token 涨约 15 倍,每任务成本 $0.53 → $1.14。
+
+→ **长程 agent 任务不要放进 Qwen 会话**:输出价差 10 倍 × 轮次膨胀,长会话账单会很可观。
+→ Qwen 会话留给**短程高价值视觉任务**(精读、复核)。这与会话路由规则 ⑥ 的严格限定互为印证。
+
+## 已知风险:Qwen 的幻觉率
+
+Artificial Analysis 的 AA-Omniscience 实测:Qwen3.8-Max 幻觉率 **23% → 40%**(上代 3.7-Max 为 23%),
+"回答不知道"的次数近乎腰斩。**跑分涨了 ≠ 审得准了**——这两件事是同一枚硬币的两面(更长的推理链 = 更多机会自信地答错)。
+
+**适用边界**(分析师给的判据,直接决定我们用不用它):
+
+| 任务类型 | 风险 | 我们的处置 |
+|---|---|---|
+| 代码 / agent(错误会"响亮地失败") | 基本不可见 | 放心用 Qwen 审 |
+| 检索 / 摘要 / **数值复算**(流畅的错误答案不被察觉) | **高** | `recompute`/`review` 提示词已加硬约束:必须逐式给出核算过程 + 原文位置引用,**无过程支撑一律判「无法验证」** |
 
 ## 用户习惯提示
 

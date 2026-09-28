@@ -23,6 +23,7 @@ try {
   const messages = [{ role: 'user', content: text }];
   const meta = reviewerMeta(messages);
   console.error(`💬 咨询方: ${meta.label} (${meta.model})｜驱动方 ${meta.driverLabel} 不参与`);
+  if (meta.caveat) console.error(`ℹ️ 存疑: ${meta.caveat}`);
   try {
     console.log(await callReviewer(messages));
   } catch (e) {

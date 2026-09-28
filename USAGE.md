@@ -115,7 +115,10 @@ node $S/pdf_read.mjs 论文.pdf --pages 1-8 "重点看第 3 节的收敛性图"
 | 你的会话跑在 | 评审/咨询方 | 用的档 |
 |---|---|---|
 | DeepSeek | Qwen(百炼) | `qwen3.8-max` |
-| Qwen(百炼) | DeepSeek | `deepseek-v4-pro`(纯文本);**含图时自动落 `deepseek-flash`** |
+| Qwen(百炼) | DeepSeek | **按 mode 分档**;含图一律落 `deepseek-flash` |
+
+档位不手挑,由 `model_roster.json` 的跑分推导(每个 mode 取主维度分数最高者),所以**它会随模型升级自动变**——
+具体当前值看 `SKILL.md`「档位依据」的表,那是从 roster 生成的。升级后怎么重分档见 [`MODEL_UPGRADE.md`](MODEL_UPGRADE.md)。
 
 **为什么重要**:如果你双开了 Qwen 会话,原来的 `qwen_review` 等于让 Qwen 审自己写的东西——"独立评审"名存实亡。翻转后,无论哪边当主模型,拿到的都是**真第二意见**。
 
@@ -134,10 +137,13 @@ node $S/pdf_read.mjs 论文.pdf --pages 1-8 "重点看第 3 节的收敛性图"
 ```markdown
 ## 双模型会话路由
 
-- **默认开 DeepSeek 会话。** 只在这两种情况开 Qwen 会话(CC Switch 切百炼 + 新终端):
-  ① 核心工作是连续多轮的视觉/PDF 精读;② 开题就知道要连续多轮啃的硬骨头。
+- **默认开 DeepSeek 会话。** 只在以下三种情况开 Qwen 会话(CC Switch 切百炼 + 新终端):
+  ① 核心工作是连续多轮的视觉/PDF 精读;② 开题就知道要连续多轮啃的硬骨头;
+  ③ 开题即知、连续多轮、以 UI/前端为主的项目(前后端混合不算——仓库级改动是 DeepSeek 强项)。
 - **中途遇到难题不要切会话**(会丢掉已建立的全部上下文)。改用 `qwen_ask` 会诊 /
   `qwen_review challenge` 对抗——**两个模型都要,比切过去只用一个更强**。
+- **评审/咨询按 mode 分档**:具体档位由 skill 内的 `model_roster.json` 推导;含图一律落 `deepseek-flash`。
+  **要改档位走 `MODEL_UPGRADE.md` 的流程,别手改。**
 - 误判触发器:同一 bug 修 2 轮不过 / 算法题卡 20 分钟 / 读了 3 个文件还没定位 → 送 `qwen_ask` 会诊。
 - **读图 / 读 PDF 一律走 Qwen**(`qwen_vision.mjs` / `pdf_read.mjs`),不要直接 Read 图片文件;
   图片存文件后提路径,不要粘贴。
@@ -203,7 +209,27 @@ node $S/pdf_read.mjs 论文.pdf --pages 1-8 "重点看第 3 节的收敛性图"
 
 ---
 
-## 十一、验证它在你手上的手感
+## 十一、模型升级了怎么办
+
+**日常不用管** —— 档位由 `model_roster.json` 的跑分推导,`SKILL.md` 的表是生成的。
+
+想在自己机器上跟新版跑分/新模型时:
+
+```bash
+S=~/.claude/skills/qwen-dual-model/scripts
+node $S/model_audit.mjs                        # 体检:看推荐档位变没变、有无漂移
+node $S/model_audit.mjs --apply                # 生效(冻结期会被拒绝,--force 越过)
+node $S/model_audit.mjs --sync-docs --write    # 同步文档里的档位表
+node $S/self_test.mjs                          # 全 ✅ 才算完成
+```
+
+- 改跑分和改政策是两件事:`scores` 跟着新数据走(可以快),`policy` 里的"哪个维度更重要"是**职责哲学**(要慢)
+- 比赛/deadline 期间建议在 roster 里设 `"freezeUntil"`,防止档位被中途换掉
+- 完整纪律(来源置信度、什么时候不该动档位)见 [`MODEL_UPGRADE.md`](MODEL_UPGRADE.md)
+
+---
+
+## 十二、验证它在你手上的手感
 
 最低成本的做法:**下次真遇到问题时随口说一句"评审一下"或"这张图看一下"**。
 

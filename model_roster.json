@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "updatedAt": "2026-09-28",
+  "recheckBy": "2026-10-31",
+  "freezeUntil": null,
+  "updatedBy": "按 2026-09 官方/第三方跑分首建;此前档位靠经验挑,本文件是转为可推导的起点",
+
+  "dimensions": {
+    "knowledge": "知识广度与深度",
+    "hard_reasoning": "长尾硬推理",
+    "code_agent": "agent/仓库级编码",
+    "algo": "竞赛级算法",
+    "instruction": "指令遵循/格式",
+    "paper": "论文级复现与评审",
+    "vision": "视觉"
+  },
+
+  "policy": {
+    "review": { "primary": "hard_reasoning", "secondary": "knowledge" },
+    "challenge": { "primary": "hard_reasoning", "secondary": "knowledge" },
+    "recompute": { "primary": "algo", "secondary": "code_agent" },
+    "latex": { "primary": "knowledge", "secondary": "instruction" }
+  },
+
+  "providers": {
+    "deepseek": {
+      "models": {
+        "deepseek-v4-pro": {
+          "label": "V4-Pro",
+          "vision": false,
+          "contextK": 1024,
+          "scores": {
+            "knowledge": { "v": 92.4, "bench": "GPQA Diamond", "source": "vendor" },
+            "hard_reasoning": { "v": 42.7, "bench": "HLE", "source": "vendor" },
+            "code_agent": { "v": 62.7, "bench": "DeepSWE v1.1", "source": "vendor" },
+            "algo": { "v": 3348, "bench": "Codeforces rating", "source": "vendor" }
+          },
+          "pricePerM": { "in": 0.66, "out": 1.98, "source": "thirdparty" },
+          "notes": "纯文本档,无原生视觉。厂商口径称其 V4-Pro 请求自 2026-09-14 起被重定向至 V4.1-Flash;本机 2026-09-28 探针实测未观察到(见 MODEL_ALIAS_PROBE)"
+        },
+        "deepseek-flash": {
+          "label": "V4.1-Flash",
+          "vision": true,
+          "contextK": 1024,
+          "scores": {
+            "knowledge": { "v": 90.9, "bench": "GPQA Diamond", "source": "vendor" },
+            "hard_reasoning": { "v": 36.8, "bench": "HLE", "source": "vendor" },
+            "code_agent": { "v": 74.2, "bench": "DeepSWE v1.1", "source": "vendor" },
+            "algo": { "v": 3471, "bench": "Codeforces rating", "source": "vendor" },
+            "vision": { "v": 89.6, "bench": "BabyVision", "source": "vendor" }
+          },
+          "pricePerM": { "in": 0.15, "out": 0.60, "source": "vendor", "note": "离峰价;峰时 $0.30/$1.20" },
+          "notes": "552B MoE(CED 非对称架构,8B 预填 / 16B 解码激活),原生视觉(ViT)。DeepSeek 侧数字基本为厂商自报,无独立复现"
+        }
+      }
+    },
+
+    "bailian": {
+      "models": {
+        "qwen3.8-max": {
+          "label": "Qwen3.8-Max",
+          "vision": true,
+          "contextK": 1024,
+          "scores": {
+            "hard_reasoning": { "v": 43.6, "bench": "HLE", "source": "vendor" },
+            "code_agent": { "v": 67.7, "bench": "SWE-bench Pro", "source": "vendor" },
+            "instruction": { "v": 82.8, "bench": "IFBench", "source": "vendor" },
+            "paper": { "v": 93.0, "bench": "PaperBench", "source": "vendor" },
+            "vision": { "v": 95.2, "bench": "MathVision", "source": "vendor" }
+          },
+          "pricePerM": { "in": 2.0, "out": 6.0, "source": "thirdparty" },
+          "notes": "2.4T MoE(~95B 激活),1M 上下文。0902 快照:QwenSWEBench V2 70.0、CoWorkBench 76.1、JobBench 64.0、BabyVision 93.8、ERQA 78.3、Toolathlon 73.3;TerminalBench 3.0 仅 29.0",
+          "risks": [
+            "AA-Omniscience 实测幻觉率由上代 23% 升至 40%(第三方);代码/agent 类错误会响亮失败故影响小,检索/摘要/数值复算类需人工兜底 —— 已由 recompute/review 提示词硬约束缓解",
+            "AA 实测每任务约 64 轮(上代 14)、输入 token 涨约 15 倍,每任务成本 $0.53 → $1.14"
+          ]
+        }
+      }
+    }
+  }
+}

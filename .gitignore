@@ -12,3 +12,7 @@ Thumbs.db
 # 测试产物与临时文件
 qwen-dual-model-test/
 *.tmp
+
+# 生成物:由 model_roster.json 经 `model_audit.mjs --apply` 推导,不手改、不入库
+# (入库会与事实源漂移;缺失时运行时静默回落到硬编码基线,不影响使用)
+tiers.generated.json

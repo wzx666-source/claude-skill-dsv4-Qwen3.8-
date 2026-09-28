@@ -7,8 +7,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  callQwen, loadKey, imageBlock, CC_SWITCH_DB,
+  callQwen, callModel, loadKey, imageBlock, CC_SWITCH_DB,
   activeProviderName, peerProviderName, reviewerMeta, pickModel, PROVIDERS,
+  MODEL_ALIAS_PROBE, resolvedTiers,
 } from './qwen_common.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -56,20 +57,38 @@ check('翻转:DeepSeek 驱动 → Qwen 评审', f1 === 'bailian', `实得 ${PROV
 const f2 = withDriver('bailian', () => peerProviderName());
 check('翻转:Qwen 驱动 → DeepSeek 评审', f2 === 'deepseek', `实得 ${PROVIDERS[f2]?.label ?? f2}`);
 
-// 6. 档位选择:DeepSeek 的 pro 是纯文本,含图必须落到 flash
-const pText = pickModel('deepseek', false);
-const pImg = pickModel('deepseek', true);
-check('档位:DeepSeek 纯文本 → pro', pText === 'deepseek-v4-pro', pText);
-check('档位:DeepSeek 含图 → flash(有视觉)', pImg === 'deepseek-flash', pImg);
-const qImg = pickModel('bailian', true);
+// 6. 档位选择:按 mode 分档(跑分依据见 qwen_common.mjs 的 PROVIDERS 注释)
+const expectTiers = [
+  ['deepseek', 'review',    'deepseek-v4-pro', '知识/推理档 GPQA 92.4'],
+  ['deepseek', 'challenge', 'deepseek-v4-pro', '知识/推理档 HLE 42.7'],
+  ['deepseek', 'recompute', 'deepseek-flash',  'agentic 档 Codeforces 3471'],
+  ['deepseek', 'latex',     'deepseek-v4-pro', '知识/推理档'],
+  ['bailian',  'recompute', 'qwen3.8-max',     'Qwen 单一档,不细分'],
+];
+for (const [prov, mode, want, why] of expectTiers) {
+  const got = pickModel(prov, { mode });
+  check(`档位:${PROVIDERS[prov].label} ${mode} → ${want}`, got === want, `${got}(${why})`);
+}
+const pImgD = pickModel('deepseek', { hasImages: true, mode: 'review' });
+check('档位:DeepSeek 含图 → flash(仅它有原生视觉)', pImgD === 'deepseek-flash', pImgD);
+const qImg = pickModel('bailian', { hasImages: true });
 check('档位:Qwen 含图 → qwen3.8-max', qImg === 'qwen3.8-max', qImg);
+const pNoMode = pickModel('deepseek', {});
+check('档位:不传 mode → 回落 textModel', pNoMode === 'deepseek-v4-pro', pNoMode);
 
 // 7. reviewerMeta 端到端(含图/不含图两种消息)
-const metaText = withDriver('deepseek', () => reviewerMeta([{ role: 'user', content: '纯文本' }]));
-check('评审元信息(纯文本)', metaText.name === 'bailian' && metaText.model === 'qwen3.8-max',
+const msgText = [{ role: 'user', content: '纯文本' }];
+const metaText = withDriver('deepseek', () => reviewerMeta(msgText, { mode: 'review' }));
+check('评审元信息(DeepSeek 驱动 + review → Qwen)', metaText.name === 'bailian' && metaText.model === 'qwen3.8-max',
   `${metaText.label} / ${metaText.model}`);
+const metaRe = withDriver('bailian', () => reviewerMeta(msgText, { mode: 'recompute' }));
+check('评审元信息(Qwen 驱动 + recompute → DeepSeek flash 档)',
+  metaRe.name === 'deepseek' && metaRe.model === 'deepseek-flash',
+  `${metaRe.label} / ${metaRe.model}`);
+check('存疑提示:字段存在且为字符串(实测未别名时默认静默)',
+  typeof withDriver('bailian', () => reviewerMeta(msgText, { mode: 'review' }).caveat) === 'string');
 const imgMsg = [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,x' } }] }];
-const metaImg = withDriver('bailian', () => reviewerMeta(imgMsg));
+const metaImg = withDriver('bailian', () => reviewerMeta(imgMsg, { mode: 'review' }));
 check('评审元信息(Qwen 驱动 + 含图 → DeepSeek flash)',
   metaImg.name === 'deepseek' && metaImg.model === 'deepseek-flash',
   `${metaImg.label} / ${metaImg.model}`);
@@ -150,6 +169,90 @@ try {
   check('评审方 banner 不污染 stdout', !leaked, leaked ? 'banner 泄漏到 stdout' : '仅走 stderr');
 } catch (e) {
   check('评审方 banner 不污染 stdout', false, e.message);
+}
+
+// 14. 溯源探针:读响应体回显的 model id,实测 DeepSeek 是否把 v4-pro 重定向到 Flash。
+//     2026-09-14 起有厂商口径称 V4-Pro 请求已由 V4.1-Flash 承接(直到 V4.1-Pro 发布);
+//     本机访问不了 DeepSeek 官方文档页,所以不采信新闻、只认你自己账号的实测回显。
+//     影响:若两档回显相同,modeModels 里 Pro/Flash 的分档当前是空操作。
+try {
+  const probe = async (model) => {
+    const r = await callModel(
+      [{ role: 'user', content: '只回复两个字母:OK' }],
+      { provider: 'deepseek', model, returnMeta: true });
+    return r.model;
+  };
+  const servedPro = await probe('deepseek-v4-pro');
+  const servedFlash = await probe('deepseek-flash');
+  check('溯源探针:两档都能取到服务端回显的 model id', !!servedPro && !!servedFlash,
+    `v4-pro→${servedPro} / flash→${servedFlash}`);
+  const liveVerdict = servedPro === servedFlash ? 'aliased' : 'distinct';
+  // 本次实测 vs 代码里记录的结论:不一致说明"实测已变但常量没更新",per-run 提示会失真
+  check('溯源探针:实测结果与 MODEL_ALIAS_PROBE 记录一致',
+    liveVerdict === MODEL_ALIAS_PROBE.verdict,
+    `实测 ${liveVerdict} / 记录 ${MODEL_ALIAS_PROBE.verdict}(记录于 ${MODEL_ALIAS_PROBE.checkedAt})`);
+  if (liveVerdict === 'aliased') {
+    console.log(`   ⚠️  实测:v4-pro 与 flash 都由 "${servedPro}" 服务 → 重定向属实,`);
+    console.log('      分档当前是空操作。把 qwen_common.mjs 的 MODEL_ALIAS_PROBE.verdict 改为 \'aliased\' 以恢复提示。');
+  } else {
+    console.log(`   ℹ️  实测:v4-pro 与 flash 回显不同 → 分档生效,Pro 的知识优势当前可得。`);
+    console.log('      局限:读的是服务端回报值,不是地面真值;网关静默别名会被骗过。');
+  }
+} catch (e) {
+  check('溯源探针', false, `${e.message}(deepseek key 或模型名不可用?)`);
+}
+
+// 15. 模型迭代通道:roster 自身的完整性
+const ROSTER_FILE = path.join(__dirname, '..', 'model_roster.json');
+const TODAY = new Date().toISOString().slice(0, 10);
+let roster = null;
+try {
+  roster = JSON.parse(fs.readFileSync(ROSTER_FILE, 'utf8'));
+  check('roster:JSON 合法且 schema 受支持', roster.schema === 1, `schema ${roster.schema}`);
+} catch (e) {
+  check('roster:JSON 合法且 schema 受支持', false, e.message);
+}
+if (roster) {
+  // 视觉档必须在 roster 里真的声明了 vision
+  const vBad = [];
+  for (const [prov, p] of Object.entries(PROVIDERS)) {
+    const m = roster.providers?.[prov]?.models?.[p.visionModel];
+    if (!m) vBad.push(`${prov}:${p.visionModel} 不在 roster`);
+    else if (!m.vision) vBad.push(`${prov}:${p.visionModel} 未标 vision:true`);
+  }
+  check('roster:各 provider 的 visionModel 都声明了 vision', vBad.length === 0, vBad.join('; ') || 'ok');
+
+  // 生效档位必须都在 roster 里 —— 抓"模型下线了但配置还指着它"
+  const eff = resolvedTiers();
+  const missing = [];
+  for (const [prov, modes] of Object.entries(eff.providers)) {
+    const known = new Set(Object.keys(roster.providers?.[prov]?.models ?? {}));
+    for (const [mode, id] of Object.entries(modes.modeModels)) {
+      if (id && !known.has(id)) missing.push(`${prov}/${mode}→${id}`);
+    }
+  }
+  check('roster:生效档位都在 roster 中', missing.length === 0,
+    missing.join('、') || `档位来源 ${eff.source}`);
+
+  if (roster.recheckBy && TODAY > roster.recheckBy) {
+    console.log(`   ⚠️  roster 复核期限已过(${roster.recheckBy})→ 跑 model_audit.mjs 并按 MODEL_UPGRADE.md 重查跑分`);
+  }
+  if (roster.freezeUntil && TODAY <= roster.freezeUntil) {
+    console.log(`   ℹ️  档位冻结中(至 ${roster.freezeUntil}):--apply 会被拒绝,漂移不判失败`);
+  }
+}
+
+// 16. 迭代通道体检:roster / 生成物 / 文档三者一致
+//     直接复用 model_audit 的判定并按退出码取结论,不在这里重复实现推导逻辑
+try {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'model_audit.mjs')], { encoding: 'utf8' });
+  const out = (r.stdout || '') + (r.stderr || '');
+  const ok = r.status === 0;
+  const detail = ok ? '无漂移'
+    : out.split('\n').map(l => l.trim()).filter(l => l.startsWith('- ') || l.startsWith('**')).slice(0, 3).join(' | ');
+  check('迭代通道:roster/生成物/文档 一致', ok, detail);
+} catch (e) {
+  check('迭代通道:roster/生成物/文档 一致', false, e.message);
 }
 
 // 汇总

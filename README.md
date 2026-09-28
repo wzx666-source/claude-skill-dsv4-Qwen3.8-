@@ -37,7 +37,17 @@ DeepSeek 会话(主线)
 | 你的会话跑在 | 评审/咨询方 | 用的档 |
 |---|---|---|
 | DeepSeek | Qwen(百炼) | `qwen3.8-max` |
-| Qwen(百炼) | DeepSeek | `deepseek-v4-pro`(纯文本);含图时自动落 `deepseek-flash` |
+| Qwen(百炼) | DeepSeek | **按 mode 分档**(含图一律落 `deepseek-flash`) |
+
+档位不手挑,由 [`model_roster.json`](model_roster.json) 的跑分**推导** —— 每个 mode 声明一个主维度,取该 provider 下该维度分数最高者:
+
+| mode | 主维度 | 副维度 |
+|---|---|---|
+| `review` / `challenge` | 长尾硬推理 | 知识 |
+| `recompute` | 竞赛级算法 | 仓库级编码 |
+| `latex` | 知识 | 指令遵循 |
+
+> 具体档位随跑分变动,**以 `model_roster.json` 为准**(`SKILL.md`「档位依据」里的表由它生成,不要手改)。模型升级后如何重分档见 [MODEL_UPGRADE.md](MODEL_UPGRADE.md)。
 
 判定依据:CC Switch 的 `settings.json → currentProviderClaude`(数据库 `is_current` 兜底);`DRIVER_PROVIDER` 环境变量可强制覆盖。
 
@@ -46,7 +56,7 @@ DeepSeek 会话(主线)
 ### 3. 会话路由
 
 1. **默认开 DeepSeek 会话**
-2. 只在这两种情况开 Qwen 会话(CC Switch 切百炼 + 新终端):① 连续多轮的视觉/PDF 精读 ② 开题即知的硬骨头
+2. 只在以下三种情况开 Qwen 会话(CC Switch 切百炼 + 新终端):① 连续多轮的视觉/PDF 精读 ② 开题即知的硬骨头 ③ 开题即知、连续多轮、以 UI/前端为主的项目(前后端混合不算)
 3. **中途遇到难题不切会话**(会丢掉全部上下文)→ 用 `qwen_ask` / `qwen_review challenge`
 4. 误判触发器:同一 bug 修 2 轮不过 / 算法题卡 20 分钟 / 读 3 个文件没定位 → 送会诊
 
@@ -63,6 +73,23 @@ DeepSeek 会话(主线)
 
 差异化 = **跨厂商**(真第二意见)+ **一次调用**(快、便宜、可脚本化)。
 
+### 5. 档位可迭代(模型升级通道)
+
+档位不是凭感觉定的,也不是写死的,而是从**跑分事实**推导出来的:
+
+```
+model_roster.json          事实(跑分/能力/价格/来源)  ← 唯一人工编辑处
+   ↓  model_audit.mjs      推导:每个 mode 的主维度 argmax
+tiers.generated.json       生成物(不手改)
+   ↓  运行时读取,缺失/损坏则静默回落硬编码基线
+qwen_common.mjs
+```
+
+- **刻意不做加权评分**:"review 需要 0.5 知识 + 0.5 推理"这种权重是拍脑袋的数字,却会被包装成计算结果。argmax 只依赖"哪个维度更重要"这一个可辩护的判断,且写在 roster 的 `policy` 里可审
+- 升级五步(填跑分 → 体检 → `--apply` → `--sync-docs` → 自检)见 **[MODEL_UPGRADE.md](MODEL_UPGRADE.md)**
+- 防误改:`freezeUntil` 可在比赛/deadline 期间冻结档位;`recheckBy` 到期提醒复核
+- 文档里的档位表都在 `<!-- ROSTER:... -->` 标记块内,由 `--sync-docs` 重写,手改会被覆盖
+
 ## 功能总览
 
 | 脚本 | 能力 | 一句话用法 |
@@ -72,7 +99,8 @@ DeepSeek 会话(主线)
 | `qwen_review.mjs` | 独立评审:review / challenge / recompute / latex | `node scripts/qwen_review.mjs review <文件...> [--context "..."]` |
 | `qwen_ask.mjs` | 第二意见/会诊/头脑风暴 | `node scripts/qwen_ask.mjs "<问题>" [--file 附件]` |
 | `qwen_read_hook.mjs` | Read 工具自动路由(图片→Qwen;Qwen 会话让行) | 项目 `.claude/settings.json` 挂 PreToolUse hook |
-| `self_test.mjs` | 全链路自检(20 项) | `node scripts/self_test.mjs` |
+| `model_audit.mjs` | **模型迭代通道**:档位体检/生成/文档同步 | `node scripts/model_audit.mjs [--apply\|--sync-docs\|--render\|--probe]` |
+| `self_test.mjs` | 全链路自检(33 项) | `node scripts/self_test.mjs` |
 
 ## 环境要求
 
@@ -178,8 +206,8 @@ node scripts/qwen_ask.mjs "架构 A 还是 B?" --file design_a.md design_b.md
 
 ## 测试
 
-- 自动自检:`node scripts/self_test.mjs`(**20 项**:环境/两家 key/驱动方识别/**翻转两个方向**/**档位选择**/文本/视觉/hook 两个方向/banner 不污染 stdout)
-- 完整测试方案:`TESTPLAN.md`(35+ 项,含素材一键生成 `scripts/make_test_materials.py`)
+- 自动自检:`node scripts/self_test.mjs`(**33 项**:环境/两家 key/驱动方识别/**翻转两个方向**/**各 mode 档位**/文本/视觉/hook 两个方向/banner 不污染 stdout/**模型溯源探针**/roster 完整性/**迭代通道一致性**)
+- 完整测试方案:`TESTPLAN.md`(A–H 共 8 组,含素材一键生成 `scripts/make_test_materials.py`;H 组是模型迭代通道的端到端测试,含"模拟新模型上线"与冻结/损坏等失效路径)
 
 ## 故障排查
 
@@ -188,6 +216,9 @@ node scripts/qwen_ask.mjs "架构 A 还是 B?" --file design_a.md design_b.md
 | `API key 无效或过期` | 到 CC Switch 检查对应 provider 的 key(报错会指明是哪家) |
 | `百炼限流(429)` | 稍后重试;脚本已内置自动重试 2 次 |
 | `模型不可用` | 检查模型名;可用 `QWEN_MODEL` / `DEEPSEEK_MODEL` 覆盖 |
+| 体检报"生成物损坏" | `tiers.generated.json` 被改坏;运行时已静默回落基线,跑 `node scripts/model_audit.mjs --apply` 重建 |
+| 体检报"档位漂移" | 改了 `model_roster.json` 没 `--apply`;或处于 `freezeUntil` 冻结期(属预期)。跑 `--apply` 或等解冻 |
+| 体检报"文档漂移" | 档位变了但文档标记块没同步 → `node scripts/model_audit.mjs --sync-docs --write` |
 | `图片过大` | 单图限 8MB,压缩后再传 |
 | 视觉调用偶发超时 | 已内置 240s 超时与重试;仍失败按降级规则处理 |
 | 评审方不是预期的那家 | 检查 CC Switch 当前 provider;或 `DRIVER_PROVIDER=bailian\|deepseek` 强制指定 |

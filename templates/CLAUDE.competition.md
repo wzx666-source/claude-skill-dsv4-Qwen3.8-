@@ -70,5 +70,13 @@
 
 - 声明里若写"通义千问(百炼)qwen3.8-max 用于题目附件图像识别",而实际某次由
   DeepSeek 原生视觉读了图(hook fail-open 放行,或手动 `Read`),**声明就不准确**
+- 同理,**评审/咨询**也跨厂商调用:本会话 DeepSeek 时评审走 Qwen;双开 Qwen 会话时评审走 DeepSeek,
+  且 DeepSeek 侧按 mode 分档(具体档位见文末版本戳)。声明若要列"用于评审的模型",按实际用过的那几档写,别只写一个
 - 赛前对一遍 `mathmodel-skill/references/2026_ai_regulation.md` 里的工具清单
 - 稳妥做法:全程按协议走 Qwen 视觉;若用过原生视觉,把 DeepSeek 一并写进声明
+
+---
+
+<!-- ROSTER:roster-stamp:begin -->
+> 档位依据:`model_roster.json` @ 2026-09-28(复核期限 2026-10-31)。若此戳早于 skill 内的 roster 版本,说明本项目这份协议已过期,请重新拷贝模板。
+<!-- ROSTER:roster-stamp:end -->

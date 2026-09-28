@@ -5,7 +5,7 @@
 ## 会话路由(开哪种会话)
 
 1. **默认开 DeepSeek 会话。** 例外只有第 2 条。
-2. **只在这两种情况开 Qwen 会话**:① 核心工作是连续多轮的视觉/PDF 精读;② 开题就知道要连续多轮啃的硬骨头。
+2. **只在以下三种情况开 Qwen 会话**:① 核心工作是连续多轮的视觉/PDF 精读;② 开题就知道要连续多轮啃的硬骨头;③ 开题即知、连续多轮、以 UI/前端为主的项目(前后端混合不算——仓库级改动是 DeepSeek 强项)。
 3. **中途遇到难题 → 不切会话**(切会话会丢掉已建立的上下文)。改用 `qwen_ask` 会诊 / `qwen_review challenge` 对抗——**两个模型都要,比切过去只用一个更强**。
 4. **误判触发器**:同一 bug 修 2 轮不过 / 算法题卡 20 分钟 / 读 3 个文件还没定位 → 送 `qwen_ask`;
    Qwen 会话里连续两次评审都是"改个参数就行" → 回 DeepSeek。
@@ -34,6 +34,25 @@ node C:/Users/王子轩/.claude/skills/qwen-dual-model/scripts/qwen_review.mjs <
 | `challenge` | 架构定稿前、关键结论定稿前 |
 | `recompute` | 关键数值结果至少独立复算一次 |
 | `latex` | 论文章节转 LaTeX 后、编译前 |
+
+评审档位(评审方为 DeepSeek 时,由 skill 内的 `model_roster.json` 推导,**不要手改**):
+
+<!-- ROSTER:mode-tiers:begin -->
+| mode | 评审档位(评审方为 DeepSeek 时) |
+|---|---|
+| `review` | `deepseek-v4-pro` |
+| `challenge` | `deepseek-v4-pro` |
+| `recompute` | `deepseek-flash` |
+| `latex` | `deepseek-v4-pro` |
+<!-- ROSTER:mode-tiers:end -->
+
+- 含图一律落 `deepseek-flash`(仅它有原生视觉);这条是硬约束,不参与推导
+- **`recompute`/`review` 的幻觉防护**:评审方必须逐式给出核算过程 + 原文位置引用;无过程支撑一律判「无法验证」,不许给"看起来对"
+- **`latex` 是编译的补充不是替代**:语法错误交给 `xelatex` 实际编译(编译器零幻觉),模型只判数学正确性与符号一致性
+
+<!-- ROSTER:roster-stamp:begin -->
+> 档位依据:`model_roster.json` @ 2026-09-28(复核期限 2026-10-31)。若此戳早于 skill 内的 roster 版本,说明本项目这份协议已过期,请重新拷贝模板。
+<!-- ROSTER:roster-stamp:end -->
 
 - **`--context "<领域背景>"`**:不给按通用标准评审;给了按该领域规范判(如 `--context "Rust 异步运行时,关注 Send/Sync 边界"`)
 - 评审报告写进 `results/reviews/`;第一行"总体结论"判定:【高】级问题必须修复后才能进下一阶段
