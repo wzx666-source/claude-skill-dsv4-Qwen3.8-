@@ -16,7 +16,7 @@
 // --context 补充领域背景,让评审按该领域的规范来判(如 "--context \"Rust 异步运行时,关注 Send/Sync 边界\""、
 //           "--context \"数学建模竞赛论文,关注模型创新性与摘要扣题\"");不给则按通用标准
 import path from 'node:path';
-import { callReviewer, reviewerMeta, readTextCapped, fail, isFatal } from './qwen_common.mjs';
+import { callReviewer, reviewerMeta, readTextCapped, inferDomain, fail, isFatal } from './qwen_common.mjs';
 
 const MODES = {
   review: `你是资深评审,独立评审以下产物(代码/推导/文档/论文片段均可)。
@@ -34,7 +34,12 @@ const MODES = {
 1. 最致命的三个质疑(按杀伤力排序,每个说明攻击点与可能的后果)
 2. 反例或反证尝试(数据/逻辑层面)
 3. 你作为评审会推荐的更优替代方案(若有)
-只基于材料本身,不许客套。`,
+硬约束(对抗模式最容易产出流畅的假质疑 —— "全力推翻"这个指令本身就是幻觉的温床,必须自己给证据):
+- 每条质疑必须能指到材料中的具体行号/位置;指不出位置的质疑,降级为【低】或标注「无法定位」
+- 只基于材料本身,不要脑补材料中没有的内容;不要为了凑够三条而编造质疑
+- 反例必须给出构造过程或数据来源;给不出就明说「未能构造出反例」,不许拿看着像反例的东西充数
+- 若材料确实站得住,就如实说站得住,并列出你试过且失败了的攻击面 —— 这比凑三条假质疑有用
+不许客套。`,
   recompute: `你是独立复算员。对照给出的数据、公式/代码和"待验证结果",独立核算关键数值是否吻合。
 第一行必须输出:总体结论:吻合 | 有出入 | 无法验证
 然后逐项列出,每项三项都要有:
@@ -50,7 +55,12 @@ const MODES = {
 2. 公式的数学正确性与符号前后一致性
 3. 中文排版(xelatex/ctex 场景)的常见坑
 第一行必须输出:总体结论:通过 | 需修改 | 有硬伤
-然后按位置列出问题与修改建议,【高/中/低】分级。`,
+然后按位置列出问题与修改建议,【高/中/低】分级。
+硬约束(符号一致性与命令正确性最容易凭空断言):
+- 每条问题必须能指到材料中的具体行号/位置;指不出位置的降级为【低】或标注「无法定位」
+- 判定「符号不一致」时,必须同时给出该符号冲突的两处出处,只给一处不算数
+- 不要凭记忆断言某条 LaTeX 命令不存在或写法有误;不确定就标注「需实际编译验证」,交给 xelatex 定夺
+- 只基于材料本身,不要脑补材料里没有的宏包或宏定义`,
 };
 
 try {
@@ -80,8 +90,11 @@ try {
     return `===== 文件${i + 1}: ${path.basename(abs)} =====\n${readTextCapped(abs)}`;
   }).join('\n\n');
   const userText = sections + (focus ? `\n\n【评审关注点】\n${focus}` : '');
+  // --context 缺省时自动推断领域(纯文件 I/O)。放在参数校验之后 —— 零参数/报错路径
+  // 在上面的 fail() 就终止了,走不到这里,不会拖慢 self_test 的用法检查。
+  const effectiveContext = context || inferDomain(files);
   // 领域背景并入 system,让评审按该领域的规范判,而不是泛泛而谈
-  const systemPrompt = MODES[mode] + (context ? `\n\n【领域背景(按此领域的规范评审)】\n${context}` : '');
+  const systemPrompt = MODES[mode] + (effectiveContext ? `\n\n【领域背景(按此领域的规范评审)】\n${effectiveContext}` : '');
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -89,8 +102,15 @@ try {
   ];
   const meta = reviewerMeta(messages, { mode });
   console.error(`🔍 评审方: ${meta.label} (${meta.model})｜按 ${mode} 档选模型`
-    + `｜驱动方 ${meta.driverLabel} 不参与本次评审`
-    + (context ? `｜领域: ${context.slice(0, 40)}` : ''));
+    + `｜驱动方 ${meta.driverLabel} 不参与本次评审`);
+  // 领域来源必须让用户看得见:自动推断的东西不能悄悄生效,否则判据从哪来就说不清了
+  if (context) {
+    console.error(`🧭 领域(手动指定): ${context.slice(0, 60)}`);
+  } else if (effectiveContext) {
+    console.error(`🧭 未给 --context,自动推断领域: ${effectiveContext}(用 --context 覆盖)`);
+  } else {
+    console.error('🧭 未给 --context,也未推断出领域 → 按通用标准评审(建议显式给 --context)');
+  }
   if (meta.caveat) console.error(`ℹ️ 存疑: ${meta.caveat}`);
   try {
     console.log(await callReviewer(messages, { mode }));

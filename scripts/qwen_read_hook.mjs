@@ -7,17 +7,24 @@
 // 可靠性设计(吸取 CCR 教训):
 //   - fail-open:Qwen API 失败时放行原 Read,绝不因外挂故障卡住主会话
 //     (注:DeepSeek-V4.1-Flash 已有原生视觉,放行后主模型确实能读,不再等于"读不了")
+//   - **fail-open 不静默**:放行时用 additionalContext 把"本次未走 Qwen"送进模型上下文,
+//     让"在回复里说明"这条协议真正可执行;若驱动档是纯文本档,明确说是死路而非假装成功。
+//     只给 additionalContext、不给 permissionDecision —— 权限流程与原来的 `{}` 等价。
 //   - 输出格式与 protect-secrets.js 一致(本机验证过):deny 用 hookSpecificOutput,放行输出 {}
 //   - 每次路由写入 hooks-logs,可事后排查
 import path from 'node:path';
 import fs from 'node:fs';
-import { callQwen, imageBlock, IMAGE_EXTS, activeProviderName } from './qwen_common.mjs';
+import { callQwen, imageBlock, IMAGE_EXTS, activeProviderName, driverVisionCapable } from './qwen_common.mjs';
 
 const VISION_PROMPT = '详细描述这张图片的全部信息:文字内容、数值、图表结构、坐标轴含义、数据趋势、异常点、公式。信息尽量完整准确,供后续推理直接使用。';
 
 function log(entry) {
   try {
-    const dir = path.join(process.env.HOME, '.claude', 'hooks-logs');
+    // USERPROFILE 优先(Windows):只认 HOME 的话,没设 HOME 的环境里
+    // 每次日志都会抛异常并被下面的 catch 吞掉 —— 偏偏 fail-open 的诊断全靠这条日志
+    const home = process.env.USERPROFILE || process.env.HOME;
+    if (!home) return;
+    const dir = path.join(home, '.claude', 'hooks-logs');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.appendFileSync(
       path.join(dir, `${new Date().toISOString().slice(0, 10)}.jsonl`),
@@ -69,9 +76,28 @@ async function main() {
     log({ level: 'ROUTED', kind: 'image', target: abs, bytes: fs.statSync(abs).size });
     deny(`🖼️ 图片已由 Qwen 自动读取,内容如下(无需再 Read 该图片):\n\n${result}`);
   } catch (e) {
-    // fail-open:外挂故障时放行 Read,绝不卡住主会话
-    log({ level: 'FALLBACK', kind: 'image', target: abs, error: e.message });
-    console.log('{}');
+    // fail-open:外挂故障时放行 Read,绝不卡住主会话。但**不能静默** ——
+    // 协议要求主模型"在回复里说明本次未走 Qwen",而在此之前它根本不知道发生过 fail-open,
+    // 那条规则因此从来没有真正执行过(要求做一件没告诉它要做的事)。
+    //
+    // 做法:`additionalContext` 是 hookSpecificOutput 里**独立于 permissionDecision** 的字段
+    // (本机 CLI 的消费代码里两者分开处理),所以这里**只给上下文、不给 permissionDecision** ——
+    // 权限流程与原来的 `{}` 逐字等价,而模型这次会知道。
+    const capable = driverVisionCapable();
+    const why = String(e.message).slice(0, 120);
+    const note = capable
+      ? `⚠️ Qwen 视觉外挂本次调用失败,已 fail-open 放行原生 Read。`
+        + `本次读图**未走 Qwen**,请在回复中明确说明;若涉及竞赛 AI 使用声明,需据实登记。`
+        + `失败原因:${why}`
+      : `⚠️ Qwen 视觉外挂本次调用失败,且当前驱动档是纯文本档 —— 放行原生 Read 也读不了图。`
+        + `本次视觉**未执行**:不要假装看到了图,请明确告知用户,`
+        + `并建议重跑 qwen_vision,或用 DEEPSEEK_MODEL=deepseek-flash 换到有原生视觉的档。`
+        + `失败原因:${why}`;
+    log({ level: 'FALLBACK', kind: 'image', target: abs, error: e.message, driverVisionCapable: capable });
+    console.error(note);   // 用户侧可见
+    console.log(JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: note },
+    }));
   }
 }
 

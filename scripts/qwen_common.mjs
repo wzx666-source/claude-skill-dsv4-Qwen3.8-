@@ -202,6 +202,25 @@ export function peerProviderName() {
   return activeProviderName() === 'bailian' ? 'deepseek' : 'bailian';
 }
 
+/** 已知的纯文本档(依据 model_roster.json 的 vision 字段:DeepSeek 侧只有 flash 有原生视觉) */
+const TEXT_ONLY_MODELS = ['deepseek-v4-pro'];
+
+/**
+ * 尽力判断**当前驱动会话的主模型**能不能直接读图 —— 决定 hook fail-open 放行原生 Read 有没有意义。
+ * 依据是 Claude Code 实际请求的模型名(CC Switch 写进 env)。
+ *
+ * 局限:只看 env。若实际档位来自别处(如 settings.json 的 model 字段),这里可能判不出来 ——
+ * 此时一律按"能读"处理:宁可漏报(退化成本次静默,与改造前等价),也不误报(把能读的情况说成读不了,
+ * 反而让模型拒绝读一张它完全读得了的图)。
+ */
+export function driverVisionCapable() {
+  const name = process.env.ANTHROPIC_MODEL
+    || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    || process.env.ANTHROPIC_DEFAULT_OPUS_MODEL || '';
+  if (!name) return true;
+  return !TEXT_ONLY_MODELS.some(m => name.includes(m));
+}
+
 /** 评审方元信息,供脚本打印「谁在评审」banner(写 stderr,不污染 stdout 的首行结论) */
 export function reviewerMeta(messages = [], { mode = '' } = {}) {
   const driver = activeProviderName();
@@ -306,6 +325,77 @@ export function readTextCapped(filePath, maxBytes = MAX_TEXT_BYTES) {
     return buf.toString('utf8', 0, maxBytes) + `\n\n[文件过大,已截断:${size} 字节,仅发送前 ${maxBytes} 字节]`;
   }
   return buf.toString('utf8');
+}
+
+// ───────────────── 领域自动推断(--context 缺省时的兜底) ─────────────────
+// 背景:`--context` 是本 skill 里最影响评审质量的参数 —— 同一个 mode,判据贴不贴领域,
+// 出来的意见完全不同。但它没有自然语言入口(见 USAGE.md §三.5),于是绝大多数评审
+// 是按通用标准判的。这里补一个**纯文件 I/O** 的推断:不联网、不调模型、不递归扫目录
+// (必须便宜到可以默认开)。它只解决"什么都不给"这一档,把"按通用标准判"提升到
+// "至少按该语言/领域的规范判";显式给了 --context 时一律以显式为准。
+const EXT_DOMAIN = {
+  py: 'Python 代码,关注类型与边界条件、异常处理、惯用法',
+  ipynb: 'Python/Jupyter 笔记本,关注执行顺序、隐式状态、可复现性',
+  m: 'MATLAB 代码,关注矩阵维度匹配、向量化、数值稳定性',
+  r: 'R 代码,关注向量化、因子类型、统计假设',
+  java: 'Java 代码,关注空值、并发、资源释放、异常传播',
+  go: 'Go 代码,关注错误处理、goroutine 泄漏、context 取消',
+  rs: 'Rust 代码,关注所有权与借用、Send/Sync 边界、取消安全',
+  cpp: 'C++ 代码,关注对象生命周期、内存安全、未定义行为',
+  cc: 'C++ 代码,关注对象生命周期、内存安全、未定义行为',
+  hpp: 'C++ 头文件,关注包含顺序、ODR、模板实例化',
+  c: 'C 代码,关注内存安全、缓冲区边界、未定义行为',
+  cs: 'C# 代码,关注空值、async/await 死锁、IDisposable',
+  ts: 'TypeScript 代码,关注类型收窄、空值处理、类型逃逸',
+  tsx: 'TypeScript/React 组件,关注渲染副作用、依赖数组、key 与状态提升',
+  jsx: 'React 组件,关注渲染副作用、依赖数组、key 与状态提升',
+  js: 'JavaScript 代码,关注异步时序、this 绑定、隐式类型转换',
+  vue: 'Vue 组件,关注响应式丢失、生命周期、props 变更',
+  sql: 'SQL,关注注入、索引失效、隐式类型转换、N+1',
+  sh: 'Shell 脚本,关注引号与分词、错误传播(set -e 语义)、可移植性',
+  tex: 'LaTeX 学术排版,关注宏包冲突、数学符号一致性、xelatex/ctex 排版坑',
+  bib: 'BibTeX 参考文献,关注条目字段完整性、重复条目、引用键一致性',
+  md: '文档/论文正文,关注论证链条、术语一致性、正文与图表是否互相印证',
+  csv: 'CSV 数据,关注列语义、缺失值、异常值、单位',
+  json: 'JSON 数据/配置,关注结构一致性、缺省值、与代码契约是否相符',
+  yaml: 'YAML 配置,关注缩进与类型歧义、锚点引用',
+  yml: 'YAML 配置,关注缩进与类型歧义、锚点引用',
+};
+
+/** 读项目根的 CLAUDE.md / README.md 取首个标题,作为一句项目背景(限 2KB;读不到就放弃) */
+function projectHeading(cwd) {
+  for (const name of ['CLAUDE.md', 'README.md', 'readme.md']) {
+    try {
+      const p = path.join(cwd, name);
+      if (!fs.existsSync(p)) continue;
+      const head = fs.readFileSync(p, 'utf8').slice(0, 2048);
+      const m = head.match(/^#{1,3}[ \t]+(.+)$/m);
+      const line = m ? m[1] : head.split('\n').map(s => s.trim())
+        .find(s => s && !s.startsWith('<!--') && !s.startsWith('---'));
+      if (line) return line.replace(/[`*_#]/g, '').trim().slice(0, 80);
+    } catch { /* 推断失败不该影响评审,静默跳过 */ }
+  }
+  return '';
+}
+
+/**
+ * 从待评审文件路径推断领域背景。**纯文件 I/O**:不联网、不调模型、不递归扫目录。
+ * @param {string[]} files 待评审文件路径
+ * @param {{cwd?: string}} [opts]
+ * @returns {string} 领域描述;推断不出时返回空串(调用方据此说明"按通用标准评审")
+ */
+export function inferDomain(files = [], { cwd = process.cwd() } = {}) {
+  const hits = new Map();
+  for (const f of files) {
+    const ext = path.extname(String(f)).toLowerCase().slice(1);
+    if (EXT_DOMAIN[ext]) hits.set(ext, (hits.get(ext) || 0) + 1);
+  }
+  // 出现次数多的扩展名优先;最多取两种(应对 .py + .md 这类混合提交)
+  const parts = [...hits.entries()].sort((a, b) => b[1] - a[1])
+    .slice(0, 2).map(([ext]) => EXT_DOMAIN[ext]);
+  const heading = projectHeading(cwd);
+  if (heading) parts.push(`项目背景: ${heading}`);
+  return parts.join('；');
 }
 
 /** 图片 → base64 content block(大小检查) */
