@@ -243,13 +243,17 @@ cat ~/.claude/hooks-logs/$(date +%F).jsonl
 
 **评审方 = 非驱动方的那个厂商**,脚本自动判定,你不需要指定:
 
+<!-- ROSTER:mode-tiers:begin -->
 | 你的会话跑在 | 评审/咨询方 | 用的档 |
 |---|---|---|
-| DeepSeek | Qwen(百炼) | `qwen3.8-max` |
-| Qwen(百炼) | DeepSeek | **按 mode 分档**;含图一律落 `deepseek-flash` |
+| DeepSeek | Qwen(百炼) | `qwen3.8-max`(4 个 mode 同一档) |
+| Qwen(百炼) | DeepSeek | `review`/`challenge`/`latex` → `deepseek-v4-pro`;`recompute` → `deepseek-flash` |
+<!-- ROSTER:mode-tiers:end -->
 
 档位不手挑,由 `model_roster.json` 的跑分推导(每个 mode 取主维度分数最高者),所以**它会随模型升级自动变**——
 具体当前值看 `SKILL.md`「档位依据」的表,那是从 roster 生成的。升级后怎么重分档见 [`MODEL_UPGRADE.md`](MODEL_UPGRADE.md)。
+
+**含图是硬约束**:一律落该厂商有原生视觉的那一档,不参与维度推导 —— 它与上表的「按 mode 分档」并列生效,两者不冲突。
 
 **为什么重要**:如果你双开了 Qwen 会话,原来的 `qwen_review` 等于让 Qwen 审自己写的东西——"独立评审"名存实亡。翻转后,无论哪边当主模型,拿到的都是**真第二意见**。
 

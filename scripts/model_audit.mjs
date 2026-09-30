@@ -27,6 +27,8 @@ const ROSTER_FILE = path.join(SKILL_ROOT, 'model_roster.json');
 const TIERS_FILE = path.join(SKILL_ROOT, 'tiers.generated.json');
 
 const SKILL_MD = path.join(SKILL_ROOT, 'SKILL.md');
+const README_MD = path.join(SKILL_ROOT, 'README.md');
+const USAGE_MD = path.join(SKILL_ROOT, 'USAGE.md');
 const TPL_CLAUDE = path.join(SKILL_ROOT, 'templates', 'CLAUDE.md');
 const TPL_COMP = path.join(SKILL_ROOT, 'templates', 'CLAUDE.competition.md');
 const GLOBAL_CLAUDE = path.join(SKILL_ROOT, '..', '..', 'CLAUDE.md');
@@ -257,6 +259,32 @@ function renderGlobalModeTiers(roster) {
     + (diverged ? '\n  ⚠️ 生效档位与 roster 推荐不一致(--apply 待执行或冻结中)。' : '');
 }
 
+/**
+ * README / USAGE 共用的「评审角色翻转」表 —— 两份文档这张表内容相同,故共用渲染器。
+ * 按档位**归组** mode(而非逐行罗列),所以档位一变整张表跟着重排,不会漏改某一行。
+ */
+function renderFlipTable(roster) {
+  const { tiers, diverged } = tierState(roster);
+  const group = (modes) => {
+    const byModel = new Map();
+    for (const [mode, id] of Object.entries(modes)) {
+      if (!byModel.has(id)) byModel.set(id, []);
+      byModel.get(id).push(`\`${mode}\``);
+    }
+    const single = byModel.size === 1;
+    return [...byModel].map(([id, ms]) => (single
+      ? `\`${id}\`(${ms.length} 个 mode 同一档)`
+      : `${ms.join('/')} → \`${id}\``)).join(';');
+  };
+  return [
+    '| 你的会话跑在 | 评审/咨询方 | 用的档 |',
+    '|---|---|---|',
+    `| DeepSeek | Qwen(百炼) | ${group(tiers.bailian || {})} |`,
+    `| Qwen(百炼) | DeepSeek | ${group(tiers.deepseek || {})} |`,
+    divergenceNote(diverged),
+  ].join('\n');
+}
+
 function renderBenchTables(roster) {
   const parts = ['### DeepSeek:两档是两个方向,不是快慢档', ''];
   parts.push(renderProviderTable(roster, 'deepseek'));
@@ -289,6 +317,9 @@ function renderStamp(roster) {
 const DOC_BLOCKS = [
   { file: SKILL_MD, block: 'mode-tiers', render: renderSkillModeTiers },
   { file: SKILL_MD, block: 'bench-tables', render: renderBenchTables },
+  // README / USAGE 各有一张翻转表 —— 不纳入同步的话,重分档时这两份会悄悄漂移
+  { file: README_MD, block: 'mode-tiers', render: renderFlipTable },
+  { file: USAGE_MD, block: 'mode-tiers', render: renderFlipTable },
   { file: TPL_CLAUDE, block: 'mode-tiers', render: renderTplModeTiers },
   { file: TPL_CLAUDE, block: 'roster-stamp', render: renderStamp },
   { file: TPL_COMP, block: 'roster-stamp', render: renderStamp },

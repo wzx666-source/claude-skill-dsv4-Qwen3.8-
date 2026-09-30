@@ -34,10 +34,12 @@ DeepSeek 会话(主线)
 
 **评审方 = 非驱动方的那个厂商**,脚本自动判定:
 
+<!-- ROSTER:mode-tiers:begin -->
 | 你的会话跑在 | 评审/咨询方 | 用的档 |
 |---|---|---|
-| DeepSeek | Qwen(百炼) | `qwen3.8-max` |
-| Qwen(百炼) | DeepSeek | **按 mode 分档**(含图一律落 `deepseek-flash`) |
+| DeepSeek | Qwen(百炼) | `qwen3.8-max`(4 个 mode 同一档) |
+| Qwen(百炼) | DeepSeek | `review`/`challenge`/`latex` → `deepseek-v4-pro`;`recompute` → `deepseek-flash` |
+<!-- ROSTER:mode-tiers:end -->
 
 档位不手挑,由 [`model_roster.json`](model_roster.json) 的跑分**推导** —— 每个 mode 声明一个主维度,取该 provider 下该维度分数最高者:
 
@@ -48,6 +50,8 @@ DeepSeek 会话(主线)
 | `latex` | 知识 | 指令遵循 |
 
 > 具体档位随跑分变动,**以 `model_roster.json` 为准**(`SKILL.md`「档位依据」里的表由它生成,不要手改)。模型升级后如何重分档见 [MODEL_UPGRADE.md](MODEL_UPGRADE.md)。
+>
+> **含图是硬约束**:一律落该厂商有原生视觉的那一档,不参与维度推导 —— 它与上表的「按 mode 分档」并列生效,两者不冲突。
 
 判定依据:CC Switch 的 `settings.json → currentProviderClaude`(数据库 `is_current` 兜底);`DRIVER_PROVIDER` 环境变量可强制覆盖。
 
