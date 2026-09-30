@@ -85,7 +85,7 @@ node $SK/model_audit.mjs --sync-docs --write   # 4. 同步文档标记块
 node $SK/self_test.mjs                         # 5. 全 ✅ 才算完成
 ```
 
-- **档位表推不出来手改**:本文、`templates/*.md`、全局 `CLAUDE.md` 里的档位表都在 `<!-- ROSTER:... -->` 标记块内,由 `--sync-docs` 重写,手改会被下次同步覆盖
+- **档位表推不出来手改**:本文、`README.md`、`USAGE.md`、`templates/*.md`、全局 `CLAUDE.md` 里的档位表都在 `<!-- ROSTER:... -->` 标记块内,由 `--sync-docs` 重写,手改会被下次同步覆盖
 - **推荐 = 该 mode 主维度的 argmax**(见 roster 的 `policy`),并列看副维度,**刻意不做加权评分**——权重会是拍脑袋的数字
 - **护栏**:`freezeUntil` 冻结档位(比赛/deadline 期间拒绝 `--apply`,且漂移不判失败);`recheckBy` 复核期限到期告警
 - **失效安全**:`tiers.generated.json` 缺失或损坏 → 运行时**静默回落**硬编码基线,主线不受影响

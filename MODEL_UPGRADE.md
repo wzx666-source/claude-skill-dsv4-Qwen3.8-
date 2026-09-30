@@ -24,7 +24,7 @@ node $SK/model_audit.mjs
 # 3. 生效(冻结中会被拒绝,确需写入加 --force)
 node $SK/model_audit.mjs --apply
 
-# 4. 同步文档标记块(SKILL.md / templates / 全局 CLAUDE.md)
+# 4. 同步文档标记块(SKILL.md / README / USAGE / templates / 全局 CLAUDE.md)
 node $SK/model_audit.mjs --sync-docs          # 先看 diff
 node $SK/model_audit.mjs --sync-docs --write  # 确认后落盘
 
