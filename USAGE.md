@@ -100,7 +100,8 @@ node $S/qwen_vision.mjs 截图.png "这个报错是什么"
 
 ### 2. hook 没装的项目 → 手动装,或手动调
 
-`templates/hooks.settings.json` 是**项目级**配置。新项目、别人 clone 下来的仓库,**默认没有**。
+`templates/hooks.settings.json` 是**项目级**配置。新项目、别人 clone 下来的仓库,**默认没有** ——
+> (**本机已经全局装好了**,所以任何新项目默认就有,不用再配。)
 
 ```bash
 # 全局生效(所有项目):把这段合并进 ~/.claude/settings.json 的 hooks.PreToolUse
@@ -148,7 +149,8 @@ node $S/qwen_review.mjs review src/cache.py   # 本次由 DeepSeek 评审
 ### 6. 开 Qwen 会话 → 纯手动,且无法省
 
 CC Switch 切「百炼」+ 新开终端。这是唯一"改主会话模型"的操作,也**没法自动化** ——
-CC Switch 的切换只影响新开会话。什么时候该开,见 §八。
+CC Switch 的切换只影响新开会话。什么时候该开,见 §八 与 `SKILL.md`「会话路由规则」;
+**要不要切到第三/第四家(Claude / GPT)是另一回事,见 skill `model-switch`。**
 
 ### 7. 撞到脚本上限 / 要覆盖环境变量 → 手动处理
 
@@ -307,13 +309,13 @@ cat ~/.claude/hooks-logs/$(date +%F).jsonl
 「开哪种会话」的通用规则(不限于这四类任务)在 `SKILL.md`「会话路由规则」与 `README.md`「核心机制」。
 判据不是"任务难不难",而是两条:**要不要长时间反复看像素**、**是不是开题就知道要连续多轮啃**。
 
-### 这张表之外:什么时候该上 Claude
+### 这张表之外:什么时候该切 Claude / 用 GPT
 
-本 skill 只管 DeepSeek + Qwen 两家。第三家(Claude 全家桶)走 CC Switch 的另一个 provider,
-**纯手动切换,不做自动路由**。判据一句话:**双模型买的是「多样性」,Claude 买的是「天花板」。**
+本 skill 只管 DeepSeek + Qwen 两家。第三家(Claude 全家桶)与第四家(GPT)都是**手动切换**,不做自动路由。
+判据一句话:**双模型买「多样性」,Claude 买「天花板」,GPT 买「你有无」。**
 
-完整判据表与"切过去用哪档"见全局 `~/.claude/CLAUDE.md` 的「什么时候上 Claude」一节;
-与本 skill 直接相关的三条升级信号见 `SKILL.md` 同名小节(**这里不重复 —— 重复的信息会漂移**)。
+**完整判据表、不该切的场景、切过去用哪档 → 读 skill `model-switch`**
+(`~/.claude/skills/model-switch/SKILL.md`)。这里不重复 —— 重复的信息会漂移。
 
 ---
 

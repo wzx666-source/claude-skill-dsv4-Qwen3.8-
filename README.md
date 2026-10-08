@@ -52,6 +52,10 @@ node $S/pdf_read.mjs 题目.pdf
 # 克隆到 Claude Code 的 skills 目录
 git clone https://github.com/wzx666-source/claude-skill-dsv4-Qwen3.8-.git ~/.claude/skills/qwen-dual-model
 
+# 本仓库装【两个】skill:上面那份是 qwen-dual-model,下面把姊妹 skill model-switch 装出来
+# (嵌套的 SKILL.md 不会被 Claude Code 识别,必须放到 skills/ 下一级)
+cp -r ~/.claude/skills/qwen-dual-model/model-switch ~/.claude/skills/
+
 # 跑自检(全部 ✅ 即可用)
 node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 ```
@@ -69,6 +73,7 @@ node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 | `SKILL.md` | Claude(自动加载) | 机制参考:分工、路由、脚本用法、降级 | **权威**(机制) |
 | `README.md`(本文) | 用户 | 入口 + 文档地图 + 安装 | — |
 | [`USAGE.md`](USAGE.md) | 用户 | 命令手册:触发方式、**哪 7 种情况必须手动调用**、四个 mode 怎么选、`--context` 心法 | **权威**(手调细节) |
+| [`model-switch/`](model-switch/) | 用户 + Claude | **姊妹 skill**:什么时候离开双模型(切 Claude / 用 GPT)的完整判据 | **权威**(跨厂商判据) |
 | `templates/` | 项目 | 拷进项目的协议(通用版 + 竞赛增量) | 副本(带版本戳,过期重拷) |
 | `MODEL_UPGRADE.md` | 维护者 | 模型升级后怎么重分档 | **权威** |
 | `TESTPLAN.md` | 维护者 | 完整测试方案 | **权威** |
@@ -112,7 +117,7 @@ node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 3. **中途遇到难题不切会话**(会丢掉全部上下文)→ 用 `qwen_ask` / `qwen_review challenge`
 4. 误判触发器:同一 bug 修 2 轮不过 / 算法题卡 20 分钟 / 读 3 个文件没定位 → 送 `qwen_ask` 会诊
 
-> **纯前端长程项目**(组件库 / 设计系统 / SPA)按全局 `~/.claude/CLAUDE.md` 的判据**切 Claude**,不开 Qwen 会话。
+> **纯前端长程项目**(组件库 / 设计系统 / SPA)按 skill **`model-switch`** 的判据**切 Claude**,不开 Qwen 会话。
 > 建议把这段路由规则放进全局 `CLAUDE.md`(决定发生在会话开始时)——模板见 [USAGE.md §七](USAGE.md#七把路由规则放进全局-claudemd)。
 
 ### 4. 和已有评审类 skill 的分工
