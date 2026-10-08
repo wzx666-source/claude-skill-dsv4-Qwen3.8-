@@ -136,6 +136,7 @@ node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 | `qwen_ask.mjs` | 第二意见/会诊/头脑风暴 | `node $S/qwen_ask.mjs "<问题>" [--file 附件]` |
 | `qwen_read_hook.mjs` | Read 工具自动路由(图片→Qwen;Qwen 会话让行) | 合并 `templates/hooks.settings.json` |
 | `model_audit.mjs` | **模型迭代通道**:档位体检/生成/文档同步 | `node $S/model_audit.mjs [--apply\|--sync-docs\|--render\|--probe]` |
+| `slides_to_png.py` | pptx → 每页 PNG(PPT 剧本用;绕开缺失的 LibreOffice/poppler) | `python $S/slides_to_png.py <pptx>` |
 | `self_test.mjs` | 全链路自检 | `node $S/self_test.mjs` |
 
 参数细节、输入上限(图 6 张/8MB、文本 200KB)、四个 mode 的选择心法 → [USAGE.md](USAGE.md) 与 `SKILL.md`「脚本用法」。

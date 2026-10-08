@@ -43,7 +43,7 @@ node $S/qwen_review.mjs challenge 讲稿.md --context "课程汇报/答辩,关�
 
 ### 第 2 步 生成 pptx(在 office-skills,不在本 skill)
 
-一次性前置(**只跑一次**):
+一次性前置(**只跑一次**;本机 2026-10-08 已装好,无需重跑):
 
 ```bash
 cd ~/.claude/skills/office-skills && npm install    # 拉 playwright + chromium,约 150MB
@@ -55,29 +55,14 @@ cd ~/.claude/skills/office-skills && npm install    # 拉 playwright + chromium,
 
 ### 第 3 步 导出每页 PNG
 
-⚠️ office-skills 自带的校验路径在本机**不可用**(`thumbnail.py` 依赖的 soffice / pdftoppm 都没装,且它产出的是拼图不是单页)。改用这条(依赖已实测在位:PowerPoint + pywin32 + pypdfium2):
-
 ```bash
-# 3a. pptx → pdf(PowerPoint COM)
-python -c "
-import win32com.client, os
-app = win32com.client.Dispatch('PowerPoint.Application')
-p = app.Presentations.Open(os.path.abspath('outputs/my-deck/presentation.pptx'), WithWindow=False)
-p.SaveAs(os.path.abspath('outputs/my-deck/presentation.pdf'), 32)
-p.Close(); app.Quit()
-"
-
-# 3b. pdf → 每页 PNG(pypdfium2,不需要 poppler)
-python -c "
-import pypdfium2 as pdfium
-pdf = pdfium.PdfDocument('outputs/my-deck/presentation.pdf')
-for i, page in enumerate(pdf):
-    page.render(scale=2.0).to_pil().save(f'outputs/my-deck/slide-{i+1}.png')
-print('rendered', len(pdf), 'pages')
-"
+python $S/slides_to_png.py outputs/my-deck/presentation.pptx
+# → outputs/my-deck/png/slide-1.png、slide-2.png …
 ```
 
-> ⚠️ 这条链路是**新搭的、尚未端到端实跑过**(只确认了依赖存在)。首次使用若报错,把报错贴回来修剧本;跑通一次后可让 Claude 把这两段存成项目里的 `render_slides.py` 复用。
+- 一条命令搞定,**已实测跑通**(2026-10-08,2 页样张跑完 HTML→PPTX→PNG→视觉检查全链路)
+- 它绕开了 office-skills 自带校验路径的坑:那条路依赖 soffice / pdftoppm(本机没装 LibreOffice 与 poppler),而且产出的是**拼图**不是单页
+- 依赖:PowerPoint + `pywin32` + `pypdfium2`(本机均已就位);渲染倍率用 `--scale` 调(默认 2.0)
 
 ### 第 4 步 逐张检查(每批 ≤6 张)
 
@@ -114,4 +99,4 @@ node $S/qwen_vision.mjs slide-1.png slide-2.png slide-3.png "逐张检查:文字
 ## 引用了谁
 
 - `office-skills`(`~/.claude/skills/office-skills/`):负责生成 pptx。它文档里说的 `venv/bin/python` 在本机**不成立**,用 `python`
-- 本机依赖实测:PowerPoint ✅ / pywin32 ✅ / pypdfium2 ✅ / LibreOffice ❌ / poppler ❌
+- 本机依赖实测:PowerPoint ✅ / pywin32 ✅ / pypdfium2 ✅ / office-skills 的 npm 依赖(playwright + chromium)✅ / LibreOffice ❌ / poppler ❌

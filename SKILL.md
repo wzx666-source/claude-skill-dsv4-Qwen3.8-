@@ -274,6 +274,9 @@ node <skill>/scripts/qwen_review.mjs review|challenge|recompute|latex <文件...
 # 自由咨询:会诊/头脑风暴/第二意见,咨询方自动翻转
 node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
 
+# PPT 排版检查的取图步:pptx → 每页 PNG(配合 scenarios/ppt.md;不需要 LibreOffice/poppler)
+python <skill>/scripts/slides_to_png.py <pptx> [输出目录] [--scale 2.0]
+
 # 模型迭代通道:体检 / 生成配置 / 同步文档(仅模型升级时用,不耗 token;--probe 除外)
 node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write] | --probe]
 ```
