@@ -65,7 +65,7 @@ S=~/.claude/skills/qwen-dual-model/scripts
 
 ## 本场景的坑
 
-1. **`qwen_vision` 把图转成文字回灌主线** —— 图从未进入主线的推理循环。**看图是为了做判断**(不是复核)时这一步有损 → 该开 Qwen 会话,或按全局 `CLAUDE.md` 的判据切 Claude
+1. **`qwen_vision` 把图转成文字回灌主线** —— 图从未进入主线的推理循环。**看图是为了做判断**(不是复核)时这一步有损 → 该开 Qwen 会话,或按 skill `model-switch` 的判据切 Claude
 2. **终稿润色在同一模型走完**(初稿换模型会丢文风),润色**之后**再送 `qwen_review` —— 顺序别反
 3. `latex` mode 永远在**实际编译之后**(编译器零幻觉,模型只判数学正确性与符号一致性)
 4. **零侵入的自动对齐**:`scipilot-figure-skill` 第 6 步写的是「用 `Read` 读 PNG」—— 本机全局 hook 会把 DeepSeek 会话里对图片的 `Read` 自动路由给 Qwen,两边已天然接上。但 **AI 声明要如实体现**这一层

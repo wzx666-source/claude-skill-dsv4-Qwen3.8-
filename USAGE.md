@@ -282,7 +282,7 @@ cat ~/.claude/hooks-logs/$(date +%F).jsonl
 
 - **默认开 DeepSeek 会话。** 只在以下**两种情况**开 Qwen 会话(CC Switch 切百炼 + 新终端):
   ① 核心工作是连续多轮的视觉/PDF 精读;② 开题就知道要连续多轮啃的硬骨头。
-  (纯前端长程项目按「什么时候上 Claude」的判据**切 Claude**,不开 Qwen 会话。)
+  (纯前端长程项目按 skill `model-switch` 的判据**切 Claude**,不开 Qwen 会话。)
 - **中途遇到难题不要切会话**(会丢掉已建立的全部上下文)。改用 `qwen_ask` 会诊 /
   `qwen_review challenge` 对抗——**两个模型都要,比切过去只用一个更强**。
 - **评审/咨询按 mode 分档**:具体档位由 skill 内的 `model_roster.json` 推导;含图一律落 `deepseek-flash`。
