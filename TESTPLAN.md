@@ -14,7 +14,7 @@ node --version                          # ≥ 22.5
 python -c "import matplotlib,pdfplumber,pypdfium2; print('py deps OK')"
 # 生成全部测试素材
 python $SK/make_test_materials.py
-# 先跑自动自检(7 项)
+# 先跑自动自检(输出末尾会打印实际跑了几项,全 ✅ 即可)
 node $SK/self_test.mjs
 ```
 
@@ -76,7 +76,7 @@ node $SK/self_test.mjs
 | E2 | PDF→拦截提示 | `echo '{"tool_name":"Read","tool_input":{"file_path":"'$T'/doc_with_figure.pdf"}}' \| node $SK/qwen_read_hook.mjs` | deny,reason 推荐 `pdf_read.mjs` |
 | E3 | 文本→放行 | `echo '{"tool_name":"Read","tool_input":{"file_path":"'$T'/flawed_derivation.md"}}' \| node $SK/qwen_read_hook.mjs` | 输出 `{}` |
 | E4 | 不存在文件→放行 | 同上,路径改为不存在文件 | 输出 `{}` |
-| E5 | **fail-open** | `QWEN_API_KEY=bad-key node $SK/qwen_read_hook.mjs`(stdin 为图片) | 输出 `{}`(外挂故障放行,不卡会话) |
+| E5 | **fail-open** | `QWEN_API_KEY=bad-key node $SK/qwen_read_hook.mjs`(stdin 为图片) | **放行**(不出现 `permissionDecision:"deny"`),且输出含 `hookSpecificOutput.additionalContext`(告知"本次读图未走 Qwen";若驱动档是纯文本档会改口说"视觉未执行") |
 | E6 | 真实会话验证(可选) | 临时把 `templates/hooks.settings.json` 合并进测试项目的 `.claude/settings.json`,新开会话让我 Read 一张图 | 观察到图片被拦截且视觉内容自动注入;测完删掉 hook |
 
 ## F. 健壮性与降级

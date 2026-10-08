@@ -1,21 +1,15 @@
-# 双模型协议(**竞赛项目**专用版:在通用版基础上加了双开信箱与阶段映射)
+# 双模型协议(竞赛项目**增量**版)
 
-本文件 = `templates/CLAUDE.md`(通用协议) + 下面这些竞赛专有内容。
-**使用方式**:整份拷成竞赛项目根目录的 `CLAUDE.md`(通用部分不会自动合并,本文件已包含全部)。
+**这是增量文件,不是超集。** 它只含竞赛专有的内容(桥接目录、Qwen 会话提醒、阶段映射、AI 声明核对);
+通用协议(会话路由、视觉协议、评审协议、PDF 处理、降级规则)在 `templates/CLAUDE.md`,**两者必须一起用**。
 
----
+**使用方式**(拷进竞赛项目根目录的 `CLAUDE.md`,顺序不能反):
 
-## 通用协议部分
+```bash
+cp <skill>/templates/CLAUDE.md CLAUDE.md && cat <skill>/templates/CLAUDE.competition.md >> CLAUDE.md
+```
 
-> 与 `templates/CLAUDE.md` 完全一致:会话路由 4 条规则、视觉协议、评审协议(自动翻转 + `--context`)、PDF 处理、降级规则。
-> 拷贝时把该文件的内容并入此处,或直接以本文件为准(下方为竞赛增量)。
-
-### 会话路由(速记)
-
-1. 默认开 DeepSeek 会话
-2. 只在这两种情况开 Qwen 会话:① 连续多轮视觉/PDF 精读 ② 开题即知的硬骨头
-3. 中途难题不切会话 → 用 `qwen_ask` / `qwen_review challenge`(两个模型都要)
-4. 误判触发器:同一 bug 修 2 轮不过 / 算法题卡 20 分钟 / 读 3 个文件没定位 → 送 `qwen_ask`
+(别用 `head -n N` 之类按行号定位来合并 —— 通用版一改行号就废。)
 
 ---
 
@@ -51,9 +45,11 @@
 
 ## 阶段映射(配合 mathmodel-skill)
 
+> **权威版在 skill 的 `scenarios/contest.md`**(含每阶段可直接复制的命令、stage 9 的关键挂载点)。下表是速查;两处对不上时以 skill 版为准。
+
 | 阶段 | 触发 |
 |---|---|
-| 1 选题 | `qwen_ask --context "数学建模竞赛选题"` 每题各问一次"该题的获奖潜力与难点";含图题先 `qwen_vision` 看图 |
+| 1 选题 | `qwen_ask "<粘贴题干>。这道题的获奖潜力与难点?"` 每题各问一次(**`qwen_ask` 没有 `--context` 参数**,背景写进问题文本);含图题先 `qwen_vision` 看图 |
 | 2 问题解析 | 题目 PDF 用 `pdf_read.mjs`(文字给主线读,含图页自动走视觉);扫描件/重视觉 PDF 走 Qwen 会话 Read |
 | 3 模型选型 | 每个候选定稿前跑 `qwen_review.mjs challenge` |
 | 5 每个 Qi | 推导+代码完成后 `review`;每个关键数值 `recompute` 一次;画图后 `qwen_vision` 检查 |

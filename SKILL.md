@@ -1,12 +1,26 @@
 ---
 name: qwen-dual-model
-description: 双模型联动——Qwen 负责视觉(读图/PDF),评审与第二意见自动落到「非驱动方」的厂商(跨厂商真第二意见,一次调用,区别于 agent-review-panel 的多智能体深审);评审档位按 mode 分,跑分依据:代码/agent 走 deepseek-flash、知识推理走 deepseek-v4-pro。含会话路由规则:默认 DeepSeek 会话,只在「连续多轮视觉精读」「开题即知的硬骨头」「纯前端重头项目」时才开 Qwen 会话;中途难题不切会话。触发词——轻量档:看图、读图、识图、检查图、这张图、手写公式、第二意见、双模型、用 Qwen、视觉;重流程档:评审、评审一下、challenge、对抗评审、复算、复核数值、LaTeX 检查、该用哪个模型、开哪个会话;迭代档:模型升级、换模型、跑分更新、重新分档、迭代通道、新模型、model_roster;GPT 档(手动第四家):生图、生成图片、海报、信息图、改图、修图、用 GPT——生成侧只有 GPT 能做,见「什么时候上 GPT」。
+description: DeepSeek 主会话的双模型外挂——Qwen 管视觉(读图/PDF),评审与第二意见自动落到非驱动方的另一厂商(跨厂商真第二意见、一次调用,区别于 agent-review-panel 的多智能体深审);评审按 mode 分档(代码/agent 走 flash,知识推理走 pro)。任务剧本在 scenarios/ 下:作业复核、答辩 PPT 终稿检查、数模竞赛插图与数值复核、论文插图与终稿评审。会话路由:默认 DeepSeek,只在连续多轮视觉精读/开题即知的硬骨头时开 Qwen 会话,中途难题不切会话。触发词——看图、读图、识图、检查图、这张图、手写公式、第二意见、双模型、用 Qwen、视觉;评审、评审一下、challenge、对抗评审、复算、复核数值、LaTeX 检查、该用哪个模型、开哪个会话、答辩 PPT 排版检查、竞赛插图复核、论文插图复核;模型升级、换模型、跑分更新、重新分档、迭代通道、新模型、model_roster;GPT 档:生图、生成图片、海报、信息图、改图、修图、用 GPT。
 allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 ---
 
 # qwen-dual-model — 双模型协作(视觉 + 跨厂商第二意见)
 
 主会话跑在 **DeepSeek** 上;Qwen(百炼 qwen3.8-max)提供两个外挂能力:**视觉**与**独立评审**。**主链路直连不动,外挂失败不影响主线**——这是与代理式路由(如 CCR)的本质区别。
+
+## 用户现在在做什么?(先看这张表)
+
+**任务剧本层**在 `scenarios/`(与本文件同目录;安装后即 `~/.claude/skills/qwen-dual-model/scenarios/`)。按用户当下在做的事挑一份读:
+
+| 用户在做 | 读哪份剧本 | 一句话 |
+|---|---|---|
+| 日常作业(题目照片 / 手写推导 / 数值答案 / 代码作业) | `scenarios/homework.md` | 只做「看得见」和「算得对」 |
+| PPT(课程汇报 / 答辩) | `scenarios/ppt.md` | 不做 PPT 本体:讲稿评审 + 逐张排版检查 |
+| 数学建模竞赛(CUMCM / MCM / 电工杯) | `scenarios/contest.md` | mathmodel-skill 的配件:各阶段挂载点 + AI 声明 |
+| 科研(文献 / 实验 / 论文) | `scenarios/research.md` | 只认领三格:PDF 图页精读、插图复核、终稿跨厂商评审 |
+
+> 用户问「这个 skill 怎么用」→ 读 `README.md` 首屏念给他。剧本里用 `$S` 指 scripts 目录(`~/.claude/skills/qwen-dual-model/scripts`)。
+> 下面各节是**机制参考**,日常按剧本走即可,不必通读。
 
 ## 分工总表
 
@@ -62,7 +76,7 @@ Flash 的 BabyVision 89.6 也够用,这正是"Qwen 挂了就放行原生 Read"�
 - **Qwen3.8-Max**:LogicVista 91.9、Vision Arena 1301 Elo(第 2)、BabyVision 93.8、ERQA 78.3、
   OSWorld-Verified 86.1、TerminalBench-2.1 86.6、QwenSWEBench V2 70.0、CoWorkBench 76.1、
   JobBench 64.0、GDPval-AA 1739 Elo、`CodeArena(WebDev) 1691 号称全球第一`
-  ⚠️ 最后这条是**单一榜单口径,证据最弱** → 只用于一条严格限定的会话路由(见规则 ⑥)
+  ⚠️ 最后这条是**单一榜单口径,证据最弱** —— 原先据此把「纯前端长程项目」列为开 Qwen 会话的情形,**现已废弃**(改按全局 `CLAUDE.md` 判据切 Claude)
 - **DeepSeek V4.1-Flash**:Terminal-Bench 2.1 90.6、Terminal-Bench 3.0/4.0 30.0/31.2、NL2Repo 65.4、
   CyberGym 88.1、MathArena Apex 65.6、Chartography 78.9、ZeroBench-main 49.0
 - **第三方独立可比**(Artificial Analysis):V4.1-Flash 指数 40 / 约 $0.27 每任务;Qwen3.8-Max 指数 53→56 / 约 $1.14 每任务
@@ -90,6 +104,7 @@ node $SK/self_test.mjs                         # 5. 全 ✅ 才算完成
 - **护栏**:`freezeUntil` 冻结档位(比赛/deadline 期间拒绝 `--apply`,且漂移不判失败);`recheckBy` 复核期限到期告警
 - **失效安全**:`tiers.generated.json` 缺失或损坏 → 运行时**静默回落**硬编码基线,主线不受影响
 - 临时想换档位试:用 `DEEPSEEK_MODEL` / `QWEN_MODEL` 环境变量覆盖(优先级最高),**别改 roster**
+  —— 注意它只影响**脚本进程**调用的模型,**不改会话主模型**
 
 ## 与其他评审类 skill 的分工(避免打架)
 
@@ -108,14 +123,13 @@ node $SK/self_test.mjs                         # 5. 全 ✅ 才算完成
 判据不是"任务难不难",而是两条:**要不要长时间反复看像素**、**是不是开题就知道要连续多轮啃**。
 
 1. **默认开 DeepSeek 会话。** 例外只有第 2 条。
-2. **只在以下三种情况开 Qwen 会话**:
+2. **只在以下两种情况开 Qwen 会话**:
    - 核心工作是连续多轮的视觉/PDF 精读(顶会论文精读、扫描件、通篇图表的 PDF)
    - 开题时就知道要连续多轮啃的硬骨头(而不是"做到一半才发现难")
-   - **开题即知、连续多轮、以 UI/前端为主**的项目(组件库 / 设计系统 / 纯前端 SPA)
-     - ✗ **排除**:前后端混合项目——仓库级改动是 DeepSeek 的强项(DeepSWE 74.2)
-     - 依据:Qwen `CodeArena(WebDev) 1691 号称全球第一`、`OSWorld-Verified 86.1`、`JobBench 64.0`;
-       **但这是单一榜单口径,证据弱于其他跑分**,故只在此窄场景生效
-     - 另见「成本与轮次」:Qwen 输出价是 Flash 的 10 倍,长程任务开 Qwen 会话要先掂量
+
+   > **纯前端长程项目不在此列** —— 组件库 / 设计系统 / SPA 按全局 `CLAUDE.md` 的判据**切 Claude**。
+   > 原先「开 Qwen 会话」的依据是单一榜单(CodeArena WebDev),证据最弱,已废弃。
+   > 另见「成本与轮次」:Qwen 输出价是 Flash 的 10 倍,长程任务开 Qwen 会话要先掂量。
 3. **中途遇到难题 → 不切会话。** 切会话会丢掉已建立的全部上下文,代价远大于收益;
    改用 `qwen_ask`(会诊)或 `qwen_review challenge`(对抗)。
    **注意这是"两个模型都要",比切过去只用一个更强。**
@@ -131,14 +145,14 @@ node $SK/self_test.mjs                         # 5. 全 ✅ 才算完成
 | **编程** 全栈架构/复杂系统设计/课程设计/毕设/比赛项目 | DeepSeek 会话 + 架构定稿前 `challenge` | 长时间读仓库,切会话=丢上下文;质量靠 plan 纪律,不靠换模型 |
 | **编程** 深层 bug 排查/性能优化 | DeepSeek 会话 + `qwen_ask` 会诊 | 走到一半才发现难,切换成本最高;且更依赖 profiling 工具输出 |
 | **编程** 竞赛难题/复杂算法推导 | DeepSeek 主推 + `qwen_review challenge` | 两个模型都要,而不是二选一 |
-| **编程** 纯前端/UI 重头项目(组件库/设计系统/SPA) | **Qwen 会话**;前后端混合则留 DeepSeek | Qwen WebDev 榜单位居首位;但仓库级改动仍是 DeepSeek 强项(DeepSWE 74.2) |
+| **编程** 纯前端/UI 重头项目(组件库/设计系统/SPA) | **切 Claude** —— 见全局 `CLAUDE.md` 判据 | 原先"开 Qwen 会话"的依据是单一榜单,证据最弱 |
 | **科研** 文献批量泛读/综述初稿/基础实验复现/写作初稿 | DeepSeek 会话 | 文字密集、便宜、迭代快 |
 | **科研** 顶会论文精读 / 含扫描件 | **Qwen 会话** | 连续多轮视觉判读 |
 | **科研** 实验改进 | DeepSeek 主推 + `challenge` | 同上,改的是代码与数据 |
 | **科研** 学术终稿润色 | **同一模型走完** + `qwen_review` | 初稿换模型润色会丢文风,终稿就不再是"你写的" |
 | **文档** PPT 草稿/大纲/逐字稿/日常文档 | DeepSeek 会话 | 文字工作 |
 | **文档** 正式项目文档/重要报告 | DeepSeek 会话 + `challenge` | 定稿前对抗一次 |
-| **文档** 答辩 PPT 终稿 | **Qwen 会话**,或 `qwen_vision` 逐张检 | 要看排版/配图的像素 |
+| **文档** 答辩 PPT 终稿 | **Qwen 会话**,或 `qwen_vision` 逐张检(`scenarios/ppt.md` 给了选择判据) | 要看排版/配图的像素 |
 | **文档** 论文插图复核 | `qwen_vision` 逐张 | 独立视觉复核关口 |
 | **学习** 日常答疑/习题讲解/技术入门 | 直接在本会话说 | 单次提问,不为一道题切整场会话 |
 | **学习** 深层原理/系统学习路线/工程化进阶 | 直接问 + 必要时 `qwen_ask` | 同上,要第二意见时才调脚本 |
@@ -237,6 +251,7 @@ mode 分档(两家的档位都由 `model_roster.json` 推导,别手改):
 <!-- ROSTER:mode-tiers:end -->
 
 - **任意 mode + 含图 → `deepseek-flash`**:这是硬约束(仅 Flash 有原生视觉 ViT),不参与维度推导
+- **咨询(`qwen_ask`)不按 mode 分档**:它恒用该厂商的 textModel(DeepSeek 侧即 `deepseek-v4-pro`);上表只对 `qwen_review` 的四个 mode 生效
 
 - 判定依据:CC Switch 的 `settings.json → currentProviderClaude`(数据库 `is_current` 兜底);识别失败按 DeepSeek 驱动处理
 - 可用环境变量 `DRIVER_PROVIDER=bailian|deepseek` 强制覆盖(测试用)
@@ -271,10 +286,11 @@ node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write]
   例:`--context "Rust 异步运行时,关注 Send/Sync 边界与取消安全"`、
   `--context "机器学习论文,关注消融实验是否充分"`、
   `--context "数学建模竞赛论文,关注模型创新性与摘要扣题"`
-- 评审输出第一行固定为「总体结论:…」,据此判定:【高】级问题必须修复后才进下一阶段
+- 评审输出第一行为「总体结论:…」(提示词约定,**非代码强制**——解析时留个容错),据此判定:【高】级问题必须修复后才进下一阶段
 - **`latex` mode 是编译的补充,不是替代**:确定性语法错误交给 `xelatex` 实际编译(编译器零幻觉),
   模型只判编译器抓不到的**数学正确性与符号一致性**。两者都做,别只做模型检查
-- 评审报告落盘 `results/reviews/`,重要图的结论落盘 `results/fig_notes/`
+- **评审报告要自己落盘**:每次评审后用 Write 把报告写到 `results/reviews/<名字>.md`,`qwen_vision` 的重要结论写到 `results/fig_notes/<名字>.md`
+  —— 这是**协议要求**(脚本不会自动写),目录不存在时先建;采用该协议的项目建议把 `results/` 写进 `.gitignore`
 - 所有脚本自动从 CC Switch 数据库读对应厂商的 key(与 CC Switch 同步);`QWEN_API_KEY`/`QWEN_MODEL`/`DEEPSEEK_API_KEY`/`DEEPSEEK_MODEL` 可覆盖
 
 ## 降级与错误处理(必须遵守)
@@ -300,6 +316,7 @@ node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write]
 **可选:项目级协议**(某项目要长期用双模型时)
 1. 拷贝 `templates/CLAUDE.md` 为项目根 `CLAUDE.md`
 2. 可选:把 `templates/hooks.settings.json` 合并进项目 `.claude/settings.json`
+   (或合并进**全局** `~/.claude/settings.json`,那样所有项目都生效;**本机已经全局装好**)
    (装后:DeepSeek 会话里 Read 图片自动转 Qwen;Qwen 会话里让行)
 3. 跑自检:`node <skill>/scripts/self_test.mjs`
 
@@ -313,7 +330,6 @@ node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write]
 3. `pdf_read` 报"图密集 PDF"(含图页 >50% 或 >8 页)
 4. 用户把图片直接粘贴到会话
 5. Qwen API 连续失败 ≥2 次
-6. 开题即知、连续多轮、以 UI/前端为主的项目(组件库 / 设计系统 / 纯前端 SPA;前后端混合不算)
 
 提醒模板(替换 <...>):
 ```
@@ -340,7 +356,7 @@ node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write]
 Artificial Analysis 实测 Qwen3.8-Max 每任务约 **64 轮 vs 上代 14 轮**、输入 token 涨约 15 倍,每任务成本 $0.53 → $1.14。
 
 → **长程 agent 任务不要放进 Qwen 会话**:输出价差 10 倍 × 轮次膨胀,长会话账单会很可观。
-→ Qwen 会话留给**短程高价值视觉任务**(精读、复核)。这与会话路由规则 ⑥ 的严格限定互为印证。
+→ Qwen 会话留给**短程高价值视觉任务**(精读、复核、扫描件)—— 这也是"只在两种情况开 Qwen 会话"那条限定成立的量化理由。
 
 ## 已知风险:Qwen 的幻觉率
 
@@ -362,20 +378,10 @@ Artificial Analysis 的 AA-Omniscience 实测:Qwen3.8-Max 幻觉率 **23% → 40
 
 ---
 
-# 附录:数学建模竞赛(CUMCM / MCM / 电工杯)阶段映射
+# 附录:数学建模竞赛(CUMCM / MCM / 电工杯)
 
-配合 `mathmodel-skill` 使用。竞赛项目的完整协议见 `templates/CLAUDE.competition.md`。
+**阶段映射与挂载点已移入任务剧本:`scenarios/contest.md`**(权威副本——含每个阶段的可复制命令、stage 9 的关键挂载点、AI 声明核对)。
 
-| 阶段 | 触发 |
-|---|---|
-| 1 选题 | `qwen_ask --context "数学建模竞赛选题"` 每题各问一次"该题的获奖潜力与难点";含图题先 `qwen_vision` 看图 |
-| 2 问题解析 | 题目 PDF 用 `pdf_read.mjs`(文字给我读,含图页自动走视觉);扫描件/重视觉 PDF 走 Qwen 会话 Read;图的结论落盘后喂主线 |
-| 3 模型选型 | 每个候选定稿前跑 `qwen_review.mjs challenge` |
-| 5 每个 Qi | 推导+代码完成后 `review`;每个关键数值 `recompute` 一次;画图后 `qwen_vision` 检查 |
-| 6 灵敏度 | 灵敏度曲线图 `qwen_vision` 检查单调性/断点;结论 `review` |
-| 8 写作 | 每节写完 `review`;转 LaTeX 后 `latex`;每张插图生成后 `qwen_vision` 配图注 |
-| 9 终审 | 摘要双通道:文字 `challenge` + 插图/排版 `qwen_vision`;全文 `latex` |
-
-> ⚠️ **AI 使用声明一致性**:参赛提交的 AI 声明需与实际工具集相符。
-> 若某次实际由 DeepSeek 原生视觉读了图(hook fail-open 放行),声明里就不能只写"Qwen 用于图像识别"。
-> 赛前对一遍 `mathmodel-skill/references/2026_ai_regulation.md`。
+- 竞赛项目的项目级协议 + bridge 双开信箱:`templates/CLAUDE.competition.md`
+- 合规细节:`mathmodel-skill/references/2026_ai_regulation.md`
+- 一句话:**别用 `qwen_ask --context`**(该参数不存在);AI 声明必须与实际用过的模型一致

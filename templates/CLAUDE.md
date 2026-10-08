@@ -5,7 +5,8 @@
 ## 会话路由(开哪种会话)
 
 1. **默认开 DeepSeek 会话。** 例外只有第 2 条。
-2. **只在以下三种情况开 Qwen 会话**:① 核心工作是连续多轮的视觉/PDF 精读;② 开题就知道要连续多轮啃的硬骨头;③ 开题即知、连续多轮、以 UI/前端为主的项目(前后端混合不算——仓库级改动是 DeepSeek 强项)。
+2. **只在以下两种情况开 Qwen 会话**:① 核心工作是连续多轮的视觉/PDF 精读;② 开题就知道要连续多轮啃的硬骨头。
+   (纯前端长程项目按全局 `CLAUDE.md` 的判据**切 Claude**,不开 Qwen 会话。)
 3. **中途遇到难题 → 不切会话**(切会话会丢掉已建立的上下文)。改用 `qwen_ask` 会诊 / `qwen_review challenge` 对抗——**两个模型都要,比切过去只用一个更强**。
 4. **误判触发器**:同一 bug 修 2 轮不过 / 算法题卡 20 分钟 / 读 3 个文件还没定位 → 送 `qwen_ask`;
    Qwen 会话里连续两次评审都是"改个参数就行" → 回 DeepSeek。
@@ -17,7 +18,7 @@ node C:/Users/王子轩/.claude/skills/qwen-dual-model/scripts/qwen_vision.mjs <
 ```
 
 - 一次最多 6 张;问题要具体(异常点?趋势?坐标轴?手写公式转 LaTeX?)
-- 重要图片的检查结论写进 `results/fig_notes/<名字>.md` 备查,不要只留在会话里
+- 重要图片的检查结论用 Write 写进 `results/fig_notes/<名字>.md` 备查(**协议要求,脚本不自动写**),不要只留在会话里
 - **例外**:Qwen 故障时 hook 会放行原生 `Read`——`deepseek-flash` 有原生视觉,此时可直接读图,并在回复里说明"本次未走 Qwen 视觉"
 
 ## 评审协议(关键产物经独立评审)
@@ -55,7 +56,7 @@ node C:/Users/王子轩/.claude/skills/qwen-dual-model/scripts/qwen_review.mjs <
 <!-- ROSTER:roster-stamp:end -->
 
 - **`--context "<领域背景>"`**:不给按通用标准评审;给了按该领域规范判(如 `--context "Rust 异步运行时,关注 Send/Sync 边界"`)
-- 评审报告写进 `results/reviews/`;第一行"总体结论"判定:【高】级问题必须修复后才能进下一阶段
+- 评审报告用 Write 写进 `results/reviews/`(**协议要求,脚本不自动写**);第一行"总体结论"(提示词约定)判定:【高】级问题必须修复后才能进下一阶段
 - **闭环规则**:修复【高】级问题后,必须把修改后的产物再送一轮 review,直到无【高】级问题为止
 - 头脑风暴/第二意见:`node .../qwen_ask.mjs "<问题>" [--file <附件>...]`(咨询方同样自动翻转)
 - 要**多智能体深度对抗**请用 `agent-review-panel`;要**学术论文同行评审模拟**用 `academic-paper-reviewer`。本协议定位是"换个厂商快速看一眼"

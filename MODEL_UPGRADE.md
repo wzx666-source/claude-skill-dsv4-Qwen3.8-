@@ -32,6 +32,10 @@ node $SK/model_audit.mjs --sync-docs --write  # 确认后落盘
 node $SK/self_test.mjs
 ```
 
+> ⚠️ **必须从安装目录运行**:上面的 `$SK` 指的就是安装目录。全局 `CLAUDE.md` 的路径由 `SKILL_ROOT/../../CLAUDE.md` 推出 ——
+> 从**仓库**跑会解析到不存在的 `C:\CLAUDE.md` 并**静默跳过**(退出码仍是 0),仓库侧因此看不到全局块的真实状态。
+> 前置:安装目录里必须装全文件(含 `README.md` / `USAGE.md` / `scenarios/`),否则这两个同步目标也会被跳过。
+
 ## 档位是怎么推出来的
 
 每个 mode 在 `policy` 里声明**一个主维度**(+可选副维度),推荐 = 该维度分数最高者:
