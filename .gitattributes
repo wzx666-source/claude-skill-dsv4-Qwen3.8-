@@ -1,0 +1,9 @@
+# 行尾纪律:文档里的 <!-- ROSTER:... --> 标记块由 model_audit.mjs 做【逐字节】比较
+# (渲染值用 \n)。若工作区被转成 CRLF,--sync-docs 会把 8 个块全报"待更新"(假漂移),
+# 进而让 self_test 失败 —— 而这很容易被误判成"改坏了内容"。
+#
+# 本机 core.autocrlf=true,加这一行即可保证 checkout / clone 后工作区仍是 LF。
+*.md text eol=lf
+
+# 本文件自身也走 LF(git 能解析 CRLF,但没必要让它变来变去)
+.gitattributes text eol=lf
