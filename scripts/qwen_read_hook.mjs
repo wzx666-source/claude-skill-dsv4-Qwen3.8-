@@ -72,7 +72,11 @@ async function main() {
 
   try {
     const content = [imageBlock(abs), { type: 'text', text: VISION_PROMPT }];
-    const result = await callQwen([{ role: 'user', content }]);
+    // 超时必须收紧:这段跑在 PreToolUse 里,**整个会话都在等它**。
+    // 用默认值(240s × 3 次尝试)最坏会卡住约 12 分钟 —— 直接违反"绝不卡住主会话"这条设计承诺。
+    // 单次 90s、不重试:够慢调用跑完(视觉调用实测 10~70s+);真超时就 fail-open 交给原生 Read,
+    // 而 Flash 有原生视觉,这条退路的代价很低。
+    const result = await callQwen([{ role: 'user', content }], { timeoutMs: 90000, retries: 0 });
     log({ level: 'ROUTED', kind: 'image', target: abs, bytes: fs.statSync(abs).size });
     deny(`🖼️ 图片已由 Qwen 自动读取,内容如下(无需再 Read 该图片):\n\n${result}`);
   } catch (e) {

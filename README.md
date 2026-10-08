@@ -166,7 +166,7 @@ node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 | 体检报"档位漂移" | 改了 `model_roster.json` 没 `--apply`;或处于 `freezeUntil` 冻结期(属预期)。跑 `--apply` 或等解冻 |
 | 体检报"文档漂移" | 档位变了但文档标记块没同步 → `node $S/model_audit.mjs --sync-docs --write` |
 | `图片过大` | 单图限 8MB,压缩后再传 |
-| 视觉调用偶发超时 | 单次超时 240s、自动重试 2 次(最坏约 12 分钟);仍失败按降级规则处理 |
+| 视觉调用偶发超时 | 单次超时 240s、自动重试 2 次(最坏约 12 分钟;**hook 内收紧为单次 90s 不重试**);仍失败按降级规则处理 |
 | 评审方不是预期的那家 | 检查 CC Switch 当前 provider;或 `DRIVER_PROVIDER=bailian\|deepseek` 强制指定 |
 | hook 不生效 | 确认 hook 配置(项目 `.claude/settings.json` 或**全局** `~/.claude/settings.json`,本机是全局);新开会话生效;看 `~/.claude/hooks-logs/` 当天日志(该目录也混有其它 hook 的 `BLOCKED` 记录,别误读) |
 | 找不到 CC Switch 数据库 | 脚本自动读 `~/.cc-switch/cc-switch.db`;或直接 `QWEN_API_KEY` / `DEEPSEEK_API_KEY` 环境变量绕过 |

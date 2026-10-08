@@ -31,7 +31,15 @@ const README_MD = path.join(SKILL_ROOT, 'README.md');
 const USAGE_MD = path.join(SKILL_ROOT, 'USAGE.md');
 const TPL_CLAUDE = path.join(SKILL_ROOT, 'templates', 'CLAUDE.md');
 const TPL_COMP = path.join(SKILL_ROOT, 'templates', 'CLAUDE.competition.md');
-const GLOBAL_CLAUDE = path.join(SKILL_ROOT, '..', '..', 'CLAUDE.md');
+// 全局 CLAUDE.md 优先按**标准位置** ~/.claude/CLAUDE.md 解析。
+// 原来只用 SKILL_ROOT/../../CLAUDE.md —— 那个式子只在"安装目录"下成立:
+// 从仓库跑会解析成 C:\CLAUDE.md(不存在)并被静默跳过,于是这一项**从未被校验**。
+const GLOBAL_CLAUDE = (() => {
+  const home = process.env.USERPROFILE || process.env.HOME;
+  const std = home ? path.join(home, '.claude', 'CLAUDE.md') : '';
+  if (std && fs.existsSync(std)) return std;
+  return path.join(SKILL_ROOT, '..', '..', 'CLAUDE.md');
+})();
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -437,6 +445,7 @@ function cmdAudit(roster, tiers) {
   const driftDocs = docs.filter(d => d.status === 'drift');
   const noMarker = docs.filter(d => d.status === 'no-marker');
   const badDocs = docs.filter(d => d.status === 'bad-marker');
+  const noFileDocs = docs.filter(d => d.status === 'no-file');
   // 标记块本身坏了(缺失/重复)永远是硬故障,与冻结无关
   if (badDocs.length) badDocs.forEach(d => bad.push(`${d.error} (${d.rel})`));
   if (driftDocs.length) {
@@ -447,7 +456,13 @@ function cmdAudit(roster, tiers) {
   if (noMarker.length) {
     warn.push(`未铺标记块(不参与同步):${noMarker.map(d => `${d.rel}#${d.block}`).join('、')}`);
   }
-  if (!driftDocs.length && !noMarker.length && !badDocs.length) lines.push('- ✅ 所有文档标记块与 roster 一致。');
+  if (noFileDocs.length) {
+    // 文件不存在 = 这一项**没被校验过**。以前它既不进 bad 也不进 warn,
+    // 于是"跳过"和"一致"在体检输出里长得一模一样(假绿)。现在明确报出来。
+    warn.push(`文件不存在,已跳过同步:${noFileDocs.map(d => d.rel).join('、')} —— 这一项目前**未被校验**(装全文件后才会)`);
+    lines.push(`- ⚠️ ${noFileDocs.length} 个同步目标不存在,已跳过 → ${noFileDocs.map(d => d.rel).join('、')}`);
+  }
+  if (!driftDocs.length && !noMarker.length && !badDocs.length && !noFileDocs.length) lines.push('- ✅ 所有文档标记块与 roster 一致。');
 
   console.log(lines.join('\n'));
   reportIssues(bad, warn);
