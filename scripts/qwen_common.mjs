@@ -251,15 +251,61 @@ export function classifyError(status, payload, providerName = 'bailian') {
 }
 
 /**
+ * 读取 OpenAI 兼容 SSE 流(stream:true),把 delta.content 拼成完整正文。
+ * 长生成(评审/咨询)走流式的意义:非流式要等整个响应生成完毕才吐第一个字节,
+ * 会撞上 node 内置 fetch(undici)隐藏的 headersTimeout 300s —— 表现为"卡死零输出、
+ * 最后报 fetch failed",报错完全指不到超时(实测与机理见记忆 qwen-review-timeout-pitfall)。
+ * 流式下响应头约 2s 即到、生成期间持续有数据,只剩调用方 AbortController 一层约束。
+ * reasoning_content(推理模型的思考链)不计入正文,只拼接 content;但会计数,
+ * 用于每 20s 向 stderr 打一次进度心跳 —— 长生成不再是黑盒,stdout 契约不受影响。
+ */
+async function readSSE(body) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  const t0 = Date.now();
+  let buf = '', content = '', model = '', streamErr = '', reasonChars = 0, lastTick = Date.now();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() ?? '';
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s.startsWith('data:')) continue;
+      const payload = s.slice(5).trim();
+      if (payload === '[DONE]') continue;
+      let j;
+      try { j = JSON.parse(payload); } catch { continue; }
+      if (j.error) { streamErr = JSON.stringify(j.error).slice(0, 200); continue; }
+      if (j.model) model = j.model;
+      const d = j.choices?.[0]?.delta;
+      if (d?.reasoning_content) reasonChars += d.reasoning_content.length;
+      if (d?.content) content += d.content;
+    }
+    if (Date.now() - lastTick >= 20000) {
+      lastTick = Date.now();
+      process.stderr.write(`⏳ 流式生成中 ${Math.round((Date.now() - t0) / 1000)}s(思考约 ${reasonChars} 字)\n`);
+    }
+  }
+  return { content, model, streamErr };
+}
+
+/**
  * 调指定 provider:失败自动重试(限流/5xx/网络),仍失败则抛出带修复提示的错误。
- * 超时 240s:百炼视觉接口延迟方差大(实测 10s~70s+),120s 会误杀慢调用
+ * 超时:非流式默认 240s(百炼视觉接口延迟方差大,实测 10s~70s+,120s 会误杀慢调用);
+ *      流式默认 900s —— 长生成只剩 AbortController 一层约束,可放宽(见 readSSE 注释);
+ *      实测样例:同一份输入的评审生成耗时 214s~609s 不等,单次上限留足冗余。
  *
  * mode       评审/咨询的 mode(决定走哪一档),见 PROVIDERS.modeModels
+ * stream     SSE 流式(长任务推荐,callReviewer 默认开)。非流式长生成会撞
+ *            undici 隐藏的 300s headersTimeout,表现为"卡死零输出 + fetch failed"
  * returnMeta 返回 { content, model } 而非纯字符串;model 取自响应体回显,
  *            是识别"别名/重定向"的唯一可靠手段(见 self_test.mjs 溯源探针)
  */
-export async function callModel(messages, { provider = 'bailian', model, mode = '', timeoutMs = 240000, retries = 2, returnMeta = false } = {}) {
+export async function callModel(messages, { provider = 'bailian', model, mode = '', timeoutMs, retries = 2, returnMeta = false, stream = false } = {}) {
   if (!PROVIDERS[provider]) throw new Error(`未知 provider: ${provider}`);
+  if (timeoutMs == null) timeoutMs = stream ? 900000 : 240000;
   const useModel = model || pickModel(provider, { hasImages: hasImageContent(messages), mode });
   const key = loadKey(provider);
   let lastErr = '';
@@ -273,8 +319,24 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
         method: 'POST',
         signal: controller.signal,
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: useModel, messages }),
+        body: JSON.stringify({ model: useModel, messages, ...(stream ? { stream: true } : {}) }),
       });
+      if (stream) {
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          lastErr = classifyError(res.status, j, provider);
+          if (res.status === 429 || res.status >= 500) {
+            if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+            continue;
+          }
+          break; // 401/403/model 错误重试无意义
+        }
+        const { content, model: streamModel, streamErr } = await readSSE(res.body);
+        if (content) return returnMeta ? { content, model: streamModel || useModel } : content;
+        lastErr = streamErr || '流式响应为空';
+        if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
       const j = await res.json().catch(() => ({}));
       if (j.choices && j.choices[0]) {
         const content = j.choices[0].message.content;
@@ -287,7 +349,11 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
       }
       break; // 401/403/model 错误重试无意义
     } catch (e) {
-      lastErr = `网络请求失败: ${e.message}`;
+      lastErr = e.name === 'AbortError'
+        ? `超时(>${Math.round(timeoutMs / 1000)}s)被中止`
+        : `网络请求失败: ${e.message}`;
+      // 流式长生成超时后重试无意义(重跑同样久):直接失败,错误里带清晰原因
+      if (stream && e.name === 'AbortError') break;
       if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
     } finally {
       clearTimeout(timer);
@@ -308,11 +374,13 @@ export async function callQwen(messages, opts = {}) {
  * 评审通道:自动走「非驱动方」的厂商,保证是真第二意见而非自己审自己。
  * 驱动方=DeepSeek → 评审走 Qwen;驱动方=Qwen → 评审走 DeepSeek。
  * 档位由 opts.mode 决定(见 PROVIDERS.modeModels);含图一律落到该厂商有视觉的档。
- * opts 会原样透传给 callModel,故 mode / returnMeta 均可用。
+ * opts 会原样透传给 callModel,故 mode / returnMeta / stream 均可用。
+ * 默认流式:评审与咨询(qwen_ask 同样走本通道)都是长生成,非流式会撞 undici
+ * 隐藏的 300s headersTimeout 而"卡死零输出"(见 callModel 注释);显式 stream:false 可回退。
  */
 export async function callReviewer(messages, opts = {}) {
   const provider = peerProviderName();
-  return callModel(messages, { ...opts, provider });
+  return callModel(messages, { stream: true, ...opts, provider });
 }
 
 /** 读文本文件,超限截断并标注(防止超大文件撑爆请求) */
