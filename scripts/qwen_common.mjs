@@ -18,6 +18,15 @@ export const CC_DIR = path.join(
 );
 export const CC_SWITCH_DB = path.join(CC_DIR, 'cc-switch.db');
 
+// ───────────────── 超时常量集中化 ─────────────────
+// 散落在各处的超时参数现在统一从这里引用,避免改一处漏另一处。
+// hook 内单独收紧(单次不重试),原因见 qwen_read_hook.mjs 注释。
+export const TIMEOUTS = {
+  nonStream: 240_000,   // 非流式(视觉等):视觉调用方差大(实测 10~70s+),留足余量
+  stream:    900_000,   // 流式长生成(评审/咨询):实测 214~609s 不等,单次上限留冗余
+  hook:       90_000,   // hook 内(PreToolUse):超时即 fail-open,不重试
+};
+
 /**
  * provider 注册表;id 与 CC Switch 数据库一致,API key 自动同步,无需硬编码。
  *
@@ -68,6 +77,30 @@ export const PROVIDERS = {
 // ② model_audit 推导时的**基线意图**(tie-break 用,避免推荐自我引用)。
 const SKILL_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const TIERS_FILE = path.join(SKILL_ROOT, 'tiers.generated.json');
+
+// ───────────────── 调用日志(JSONL,供 show_calls.mjs 分析) ─────────────────
+const LOG_DIR  = path.join(SKILL_ROOT, 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'calls.jsonl');
+
+/**
+ * 追加一条调用记录到 logs/calls.jsonl。
+ * fail-safe:写入失败绝不影响主调用流程(try/catch 吞掉)。
+ * 字段含义:
+ *   ts           ISO 时间戳
+ *   provider     bailian | deepseek
+ *   model        实际使用的模型名
+ *   mode         评审/咨询的 mode(视觉调用为空)
+ *   stream       是否流式
+ *   ok           本次调用是否成功
+ *   durationMs   从发出请求到拿到结果的总毫秒数
+ *   error        失败时的错误摘要(前 120 字符)
+ */
+function appendCallLog(entry) {
+  try {
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
+  } catch {}
+}
 
 /** 模块级读一次;**缺失/损坏一律静默回落硬编码** —— 生成物坏掉绝不影响主线 */
 function loadGeneratedTiers() {
@@ -305,10 +338,12 @@ async function readSSE(body) {
  */
 export async function callModel(messages, { provider = 'bailian', model, mode = '', timeoutMs, retries = 2, returnMeta = false, stream = false } = {}) {
   if (!PROVIDERS[provider]) throw new Error(`未知 provider: ${provider}`);
-  if (timeoutMs == null) timeoutMs = stream ? 900000 : 240000;
+  if (timeoutMs == null) timeoutMs = stream ? TIMEOUTS.stream : TIMEOUTS.nonStream;
+  const t0 = Date.now();
   const useModel = model || pickModel(provider, { hasImages: hasImageContent(messages), mode });
   const key = loadKey(provider);
   let lastErr = '';
+  let firstByteMs = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     // 用 AbortController 而非 AbortSignal.timeout:确保失败退出时定时器已清理
     // (Windows 上 pending 的 timeout handle 会在 process.exit 时触发 libuv 断言崩溃)
@@ -321,6 +356,7 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: useModel, messages, ...(stream ? { stream: true } : {}) }),
       });
+      if (!firstByteMs) firstByteMs = Date.now() - t0;
       if (stream) {
         if (!res.ok) {
           const j = await res.json().catch(() => ({}));
@@ -332,7 +368,10 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
           break; // 401/403/model 错误重试无意义
         }
         const { content, model: streamModel, streamErr } = await readSSE(res.body);
-        if (content) return returnMeta ? { content, model: streamModel || useModel } : content;
+        if (content) {
+          appendCallLog({ provider, model: streamModel || useModel, mode, stream, ok: true, durationMs: Date.now() - t0, firstByteMs });
+          return returnMeta ? { content, model: streamModel || useModel } : content;
+        }
         lastErr = streamErr || '流式响应为空';
         if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
         continue;
@@ -340,6 +379,7 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
       const j = await res.json().catch(() => ({}));
       if (j.choices && j.choices[0]) {
         const content = j.choices[0].message.content;
+        appendCallLog({ provider, model: j.model || useModel, mode, stream, ok: true, durationMs: Date.now() - t0, firstByteMs });
         return returnMeta ? { content, model: j.model || useModel } : content;
       }
       lastErr = classifyError(res.status, j, provider);
@@ -359,6 +399,7 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
       clearTimeout(timer);
     }
   }
+  appendCallLog({ provider, model: useModel, mode, stream, ok: false, durationMs: Date.now() - t0, firstByteMs, error: lastErr.slice(0, 120) });
   throw new Error(`${PROVIDERS[provider].label} 调用失败(已重试 ${retries} 次): ${lastErr}`);
 }
 

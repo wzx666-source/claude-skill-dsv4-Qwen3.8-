@@ -7,9 +7,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  callQwen, callModel, loadKey, imageBlock, CC_SWITCH_DB,
+  callQwen, callModel, callReviewer, loadKey, imageBlock, CC_SWITCH_DB,
   activeProviderName, peerProviderName, reviewerMeta, pickModel, PROVIDERS,
-  MODEL_ALIAS_PROBE, resolvedTiers,
+  MODEL_ALIAS_PROBE, resolvedTiers, TIMEOUTS,
 } from './qwen_common.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -254,6 +254,31 @@ try {
 } catch (e) {
   check('迭代通道:roster/生成物/文档 一致', false, e.message);
 }
+
+// 17. 评审通道冒烟:callReviewer 真实调用(极短 prompt,验证通道+流式路径)
+//     报告指出 33 项中没有一项真正走过 callReviewer,今晚的流式修复完全靠人肉验证——本项填这个盲区。
+//     使用极短 prompt,让开销可控(不是让评审给出高质量意见,只是验证通道通畅)。
+try {
+  const reviewMsg = [
+    { role: 'system', content: '你是评审员。第一行必须输出:总体结论:通过 | 需修改 | 有硬伤' },
+    { role: 'user', content: 'x = 1 + 1  # 计算 x 的值\n\n上面是一行 Python 代码,请评审。' },
+  ];
+  // 使用 callReviewer(走流式+翻转通道),设较短超时以控制自检时间(冒烟不求完整生成)
+  const smoke = await callReviewer(reviewMsg, { mode: 'review', timeoutMs: 120_000 });
+  const hasVerdict = /总体结论/.test(smoke);
+  check('评审通道冒烟(callReviewer + 流式 + 翻转)', typeof smoke === 'string' && smoke.length > 10,
+    hasVerdict ? `首行包含「总体结论」(${smoke.split('\n')[0].trim().slice(0, 50)})` : `长度 ${smoke.length},首行未含「总体结论」`);
+  if (!hasVerdict) {
+    console.log('   ⚠️  首行格式不符,评审输出可能有变化;用 --json 模式消费时注意容错');
+  }
+} catch (e) {
+  check('评审通道冒烟(callReviewer + 流式 + 翻转)', false, e.message.slice(0, 80));
+}
+
+// 18. TIMEOUTS 常量存在且值合理(确保集中化后没有漏掉)
+check('TIMEOUTS 常量:nonStream/stream/hook 都已导出',
+  typeof TIMEOUTS?.nonStream === 'number' && typeof TIMEOUTS?.stream === 'number' && typeof TIMEOUTS?.hook === 'number',
+  `nonStream=${TIMEOUTS?.nonStream}ms stream=${TIMEOUTS?.stream}ms hook=${TIMEOUTS?.hook}ms`);
 
 // 汇总
 const failed = results.filter(r => !r.ok);

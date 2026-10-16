@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 // qwen_review.mjs — 独立评审(评审方自动 = 非驱动方的那个厂商,提供真实第二意见)
-// 用法: node qwen_review.mjs <mode> <文件...> [--focus "<关注点>"] [--context "<领域背景>"]
+// 用法: node qwen_review.mjs <mode> <文件...> [--focus "<关注点>"] [--context "<领域背景>"] [--json]
 //   review    同行评审:逻辑/数值/符号/表达,分级报告
 //   challenge 对抗评审:假设结论错误,全力找反例与致命质疑(架构选型、结论定稿、终稿提交前)
 //   recompute 独立复算:对照数据/公式/代码与结果,核验关键数值
 //   latex     LaTeX 与公式检查:语法、数学正确性、符号一致性
+//
+// --json    输出 JSON { verdict, mode, issues:[{level,text}], raw } 供脚本消费(否则默认纯文本)
+//           **issues 只在 review / latex 有结构化条目**:这两个 mode 的提示词要求
+//           「【高/中/低】…」式输出;challenge 是编号式质疑、recompute 是【核算过程】段落,
+//           都匹配不上,issues 必然为空 —— 此时脚本会向 stderr 告警。消费方勿把 issues:[]
+//           读成"无问题":那两种 mode 必须去看 raw。
+//           首行格式不符时向 stderr 打警告,不影响 stdout(脚本消费时仍建议留容错)
 //
 // 评审方自动翻转:本会话跑 DeepSeek → 评审走 Qwen;双开 Qwen 会话 → 评审走 DeepSeek。
 // 这样无论哪边当主模型,都不会退化成"自己审自己"。评审方打印在 stderr,stdout 首行仍是「总体结论:…」。
@@ -75,14 +82,16 @@ try {
   }
   const focus = takeOpt('--focus');
   const context = takeOpt('--context');
+  const jsonOut = args.includes('--json');
+  if (jsonOut) args.splice(args.indexOf('--json'), 1);
   const mode = args[0];
   const files = args.slice(1);
   if (!MODES[mode]) {
     fail(`mode 必须是 ${Object.keys(MODES).join(' | ')},收到: ${mode}`
-      + '\n用法: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."]');
+      + '\n用法: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."] [--json]');
   }
   if (files.length === 0) {
-    fail('至少给一个文件: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."]');
+    fail('至少给一个文件: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."] [--json]');
   }
 
   const sections = files.map((f, i) => {
@@ -113,7 +122,34 @@ try {
   }
   if (meta.caveat) console.error(`ℹ️ 存疑: ${meta.caveat}`);
   try {
-    console.log(await callReviewer(messages, { mode }));
+    const raw = await callReviewer(messages, { mode });
+    // 格式校验:首行必须是「总体结论:…」,违反则向 stderr 打警告(不影响 stdout 正常输出)
+    const firstLine = raw.split('\n')[0].trim();
+    if (!/^总体结论[:：]/.test(firstLine)) {
+      process.stderr.write(`⚠️  格式警告:输出首行不是「总体结论:…」(实际:「${firstLine.slice(0, 60)}」)。解析脚本留容错。\n`);
+    }
+    if (jsonOut) {
+      // 解析首行结论与问题列表,包成 JSON 输出供脚本消费
+      const verdict = firstLine.replace(/^总体结论[:：]\s*/, '').trim();
+      const issueRe = /^[【\[]([高中低])[】\]]\s*(.+)/;
+      const issues = raw.split('\n')
+        .map(l => l.trim())
+        .filter(l => issueRe.test(l))
+        .map(l => {
+          const m = l.match(issueRe);
+          return { level: m[1], text: m[2] };
+        });
+      // challenge(编号式质疑)/ recompute(【核算过程】段落)本就不产「【高/中/低】」条目,
+      // 解析必然为空。消费方若把 issues:[] 读成"无问题"就会误判 —— 正文里明明有【】时显式告警。
+      if (issues.length === 0 && raw.includes('【')) {
+        process.stderr.write('⚠️  issues 解析为空,但正文含【…】标记 —— 当前 mode 的输出不是'
+          + '「【高/中/低】」式条目(结构化 issues 仅 review / latex 产出)。'
+          + '请直接读 raw,勿把 issues:[] 当作"无问题"。\n');
+      }
+      console.log(JSON.stringify({ verdict, mode, issues, raw }, null, 2));
+    } else {
+      console.log(raw);
+    }
   } catch (e) {
     fail(e.message);
   }

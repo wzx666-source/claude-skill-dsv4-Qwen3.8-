@@ -63,7 +63,25 @@ node $S/qwen_ask.mjs "这个死锁怎么排查" --file worker.py
 
 # ── 读 PDF:自动提文字 + 含图页转图给 Qwen
 node $S/pdf_read.mjs 论文.pdf --pages 1-8 "重点看第 3 节的收敛性图"
+
+# ── 让脚本消费评审结果:结构化 JSON(banner/领域/告警都走 stderr,stdout 干净可管道)
+node $S/qwen_review.mjs review src/cache.py --json | jq '.verdict, .issues'
+
+# ── 看最近的调用日志(耗时/首字节/成败;排查"慢在哪"用它)
+node $S/show_calls.mjs 10          # 最近 10 条(默认 20)
+node $S/show_calls.mjs --errors    # 只看失败条目
 ```
+
+**`--json` 的结构化字段有个边界**:`issues` 只在 `review` / `latex` 两个 mode 有值 ——
+它们是提示词里要求「【高/中/低】…」式输出的那两种。`challenge`(编号式质疑)与
+`recompute`(【核算过程】段落)匹配不上这个格式,`issues` 会是空数组(此时脚本会向 stderr 告警)。
+**别把 `issues: []` 读成"没问题"** —— 这两种 mode 得去看 `raw`。JSON 形如
+`{ verdict, mode, issues: [{level, text}], raw }`。
+
+**`show_calls.mjs` 的「首字节」列**是排查"慢"的关键:它记的是**响应头到达**的时间。
+流式调用里首字节很快、总耗时很长 = 模型在真生成;首字节本就很慢 = 服务端在排队。
+分不清这两者,就会把排队误判成"模型变慢了"。日志本身在 `<skill>/logs/calls.jsonl`
+(已 gitignore),只记时间戳/厂商/模型/mode/耗时,**不记 key、不记 prompt 正文**。
 
 ### ③ hook 自动(可选,装在某项目里)
 
@@ -171,8 +189,9 @@ CC Switch 的切换只影响新开会话。什么时候该开,见 §八 与 `SKI
 ### 附:fail-open 不再静默(2026-09-29 起)
 
 Qwen API 挂掉时,hook 仍会**放行原 `Read`**(fail-open 语义不变,绝不卡住主会话),
-但**不再悄悄放行**。**多久算挂**:hook 内单次 90s 且**不重试**(普通脚本调用仍是 240s × 最多 3 次尝试),
-所以最多等 90 秒就会放行:
+但**不再悄悄放行**。**多久算挂**:hook 内单次 90s 且**不重试**;普通脚本调用(视觉/非流式)为 240s × 最多 3 次,
+评审/咨询(流式长生成)为 900s 单次不重试 —— 三档超时集中在 `TIMEOUTS` 常量里维护。
+最多等 90 秒就会放行:
 
 - 模型侧:hook 用 `hookSpecificOutput.additionalContext` 注入一条说明,主模型因此知道
   "本次读图未走 Qwen",可以在回复里讲清楚 —— 在此之前它根本不知道,所以协议里
@@ -350,6 +369,8 @@ cat ~/.claude/hooks-logs/$(date +%F).jsonl
 - **绝不编造"Qwen 说…"** —— 没跑成功的调用,结果不存在
 - 外挂故障**不得阻塞主线推理**(这是本方案与代理式路由的本质区别)
 - Qwen 视觉挂掉时,hook 会放行原生 `Read`;`deepseek-flash` 有原生视觉,可直接读图(在回复里说明本次未走 Qwen)
+- **"怎么这么慢"先看日志再猜**:`node $S/show_calls.mjs --errors` 看失败条目,
+  `show_calls.mjs` 看耗时/首字节 —— 首字节慢是服务端排队,总耗时慢才是生成慢,处置方式不同
 
 排错表见 [README §故障排查](README.md#故障排查)。
 

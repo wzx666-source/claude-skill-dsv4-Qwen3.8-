@@ -14,7 +14,7 @@
 //   - 每次路由写入 hooks-logs,可事后排查
 import path from 'node:path';
 import fs from 'node:fs';
-import { callQwen, imageBlock, IMAGE_EXTS, activeProviderName, driverVisionCapable } from './qwen_common.mjs';
+import { callQwen, imageBlock, IMAGE_EXTS, activeProviderName, driverVisionCapable, TIMEOUTS } from './qwen_common.mjs';
 
 const VISION_PROMPT = '详细描述这张图片的全部信息:文字内容、数值、图表结构、坐标轴含义、数据趋势、异常点、公式。信息尽量完整准确,供后续推理直接使用。';
 
@@ -76,7 +76,7 @@ async function main() {
     // 用默认值(240s × 3 次尝试)最坏会卡住约 12 分钟 —— 直接违反"绝不卡住主会话"这条设计承诺。
     // 单次 90s、不重试:够慢调用跑完(视觉调用实测 10~70s+);真超时就 fail-open 交给原生 Read,
     // 而 Flash 有原生视觉,这条退路的代价很低。
-    const result = await callQwen([{ role: 'user', content }], { timeoutMs: 90000, retries: 0 });
+    const result = await callQwen([{ role: 'user', content }], { timeoutMs: TIMEOUTS.hook, retries: 0 });
     log({ level: 'ROUTED', kind: 'image', target: abs, bytes: fs.statSync(abs).size });
     deny(`🖼️ 图片已由 Qwen 自动读取,内容如下(无需再 Read 该图片):\n\n${result}`);
   } catch (e) {

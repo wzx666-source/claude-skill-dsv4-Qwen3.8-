@@ -211,9 +211,9 @@ node <skill>/scripts/qwen_vision.mjs <图片路径...> "<问题>"
 # PDF:自动提取文字 + 含图页转 PNG 喂视觉(优先用这个,不用开 Qwen 会话)
 node <skill>/scripts/pdf_read.mjs <pdf> [--pages 1-3] [--no-images] [--max-img-pages 4] ["图页检查重点"]
 
-# 评审:四模式,评审方自动翻转
+# 评审:四模式,评审方自动翻转(--json 出结构化结果;issues 仅 review/latex 有值)
 node <skill>/scripts/qwen_review.mjs review|challenge|recompute|latex <文件...> \
-     [--focus "本轮关注点"] [--context "领域背景"]
+     [--focus "本轮关注点"] [--context "领域背景"] [--json]
 
 # 自由咨询:会诊/头脑风暴/第二意见,咨询方自动翻转
 node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
@@ -223,6 +223,9 @@ python <skill>/scripts/slides_to_png.py <pptx> [输出目录] [--scale 2.0]
 
 # 模型迭代通道:体检 / 生成配置 / 同步文档(仅模型升级时用,不耗 token;--probe 除外)
 node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write] | --probe]
+
+# 调用日志:耗时 / 首字节 / 成败(排查"慢在哪"、确认某次调用到底发出去没有)
+node <skill>/scripts/show_calls.mjs [N] [--errors]
 ```
 
 - **`--context` 很关键**:不给则按通用标准评审;给了就按该领域的规范判。
@@ -234,6 +237,9 @@ node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write]
   `--context "机器学习论文,关注消融实验是否充分"`、
   `--context "数学建模竞赛论文,关注模型创新性与摘要扣题"`
 - 评审输出第一行为「总体结论:…」(提示词约定,**非代码强制**——解析时留个容错),据此判定:【高】级问题必须修复后才进下一阶段
+- **`--json` 的 `issues` 只在 `review`/`latex` 有值**:`challenge`(编号式质疑)与 `recompute`(【核算过程】段落)
+  匹配不上「【高/中/低】…」格式,`issues` 会是空数组(脚本此时向 stderr 告警)。
+  **别把 `issues: []` 读成"没问题"** —— 这两种 mode 必须去看 `raw`。`stdout` 只有 JSON,banner/告警全在 `stderr`,可直接管道给 `jq`
 - **`latex` mode 是编译的补充,不是替代**:确定性语法错误交给 `xelatex` 实际编译(编译器零幻觉),
   模型只判编译器抓不到的**数学正确性与符号一致性**。两者都做,别只做模型检查
 - **评审报告要自己落盘**:每次评审后用 Write 把报告写到 `results/reviews/<名字>.md`,`qwen_vision` 的重要结论写到 `results/fig_notes/<名字>.md`
@@ -252,8 +258,10 @@ node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write]
    把"本次读图未走 Qwen,请在回复中说明"送进模型上下文 —— 在此之前主模型根本不知道发生过 fail-open,
    所以"在回复里说明"这条协议从来没真正执行过。若驱动档是纯文本档,hook 会改口明说
    "本次视觉未执行,不要假装看到了图"。日志仍记 `FALLBACK`,并加 `driverVisionCapable` 字段标明当次判断。
-   **hook 内的超时单独收紧**(2026-10-08 起):单次 90s、**不重试** —— 默认的 240s×3 次尝试最坏会让
-   会话卡约 12 分钟,那是"绝不卡住主会话"这条承诺的直接反面;超时即走上面的 fail-open。
+   **hook 内的超时单独收紧**(2026-10-08 起):单次 90s、**不重试** —— 三档超时统一在
+   `qwen_common.mjs` 的 `TIMEOUTS` 里(视觉/非流式 240s × 最多 3 次尝试、评审/咨询流式 900s 单次、
+   hook 90s 单次)。普通脚本调用最坏能等十几分钟,但 hook 是**阻塞主会话**的,不能按那个尺度等 ——
+   90s 超时即走上面的 fail-open。
 3. 图片结论与代码输出矛盾时,以代码实际输出为准,让 Qwen 再确认一次
 4. 绝不因为外挂故障停止主线推理;绝不编造"Qwen 说…"的内容——没跑成功的调用,结果不存在
 
