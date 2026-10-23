@@ -82,16 +82,21 @@ try {
   }
   const focus = takeOpt('--focus');
   const context = takeOpt('--context');
+  const budgetRaw = takeOpt('--budget');
   const jsonOut = args.includes('--json');
   if (jsonOut) args.splice(args.indexOf('--json'), 1);
+  const budgetSec = budgetRaw === '' ? null : Number(budgetRaw);
+  if (budgetRaw !== '' && (!Number.isFinite(budgetSec) || budgetSec < 1)) {
+    fail(`--budget 应为 ≥1 的秒数,收到: "${budgetRaw}"`);
+  }
   const mode = args[0];
   const files = args.slice(1);
   if (!MODES[mode]) {
     fail(`mode 必须是 ${Object.keys(MODES).join(' | ')},收到: ${mode}`
-      + '\n用法: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."] [--json]');
+      + '\n用法: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."] [--json] [--budget 秒]');
   }
   if (files.length === 0) {
-    fail('至少给一个文件: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."] [--json]');
+    fail('至少给一个文件: node qwen_review.mjs <mode> <文件...> [--focus "..."] [--context "..."] [--json] [--budget 秒]');
   }
 
   const sections = files.map((f, i) => {
@@ -122,9 +127,20 @@ try {
   }
   if (meta.caveat) console.error(`ℹ️ 存疑: ${meta.caveat}`);
   try {
-    const raw = await callReviewer(messages, { mode });
+    const callOpts = { mode };
+    if (budgetSec != null) callOpts.budgetMs = budgetSec * 1000;
+    const raw = await callReviewer(messages, callOpts);
+    // 被预算截断:仍输出(半份评审有用),但必须让机器和人都知道它不完整 ——
+    // 否则 --json 消费方会把"截在 60% 的通过结论"当成一次干净的通过。
+    const partial = /\[⚠️ 流式被截断/.test(raw);
+    const body = raw.replace(/\n*\[⚠️ 流式被截断[^\]]*\]\s*$/, '');
+    if (partial) {
+      process.stderr.write('⚠️  本次评审被预算截断,以下意见**不完整** —— 别据此下"通过"的结论;'
+        + '加大 --budget 重跑。\n');
+      process.exitCode = 2;
+    }
     // 格式校验:首行必须是「总体结论:…」,违反则向 stderr 打警告(不影响 stdout 正常输出)
-    const firstLine = raw.split('\n')[0].trim();
+    const firstLine = body.split('\n')[0].trim();
     if (!/^总体结论[:：]/.test(firstLine)) {
       process.stderr.write(`⚠️  格式警告:输出首行不是「总体结论:…」(实际:「${firstLine.slice(0, 60)}」)。解析脚本留容错。\n`);
     }
@@ -132,7 +148,7 @@ try {
       // 解析首行结论与问题列表,包成 JSON 输出供脚本消费
       const verdict = firstLine.replace(/^总体结论[:：]\s*/, '').trim();
       const issueRe = /^[【\[]([高中低])[】\]]\s*(.+)/;
-      const issues = raw.split('\n')
+      const issues = body.split('\n')
         .map(l => l.trim())
         .filter(l => issueRe.test(l))
         .map(l => {
@@ -141,14 +157,14 @@ try {
         });
       // challenge(编号式质疑)/ recompute(【核算过程】段落)本就不产「【高/中/低】」条目,
       // 解析必然为空。消费方若把 issues:[] 读成"无问题"就会误判 —— 正文里明明有【】时显式告警。
-      if (issues.length === 0 && raw.includes('【')) {
+      if (issues.length === 0 && body.includes('【')) {
         process.stderr.write('⚠️  issues 解析为空,但正文含【…】标记 —— 当前 mode 的输出不是'
           + '「【高/中/低】」式条目(结构化 issues 仅 review / latex 产出)。'
           + '请直接读 raw,勿把 issues:[] 当作"无问题"。\n');
       }
-      console.log(JSON.stringify({ verdict, mode, issues, raw }, null, 2));
+      console.log(JSON.stringify({ verdict, mode, partial, issues, raw: body }, null, 2));
     } else {
-      console.log(raw);
+      console.log(body);
     }
   } catch (e) {
     fail(e.message);

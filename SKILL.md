@@ -18,6 +18,7 @@ allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 | PPT(课程汇报 / 答辩) | `scenarios/ppt.md` | 不做 PPT 本体:讲稿评审 + 逐张排版检查 |
 | 数学建模竞赛(CUMCM / MCM / 电工杯) | `scenarios/contest.md` | mathmodel-skill 的配件:各阶段挂载点 + AI 声明 |
 | 科研(文献 / 实验 / 论文) | `scenarios/research.md` | 只认领三格:PDF 图页精读、插图复核、终稿跨厂商评审 |
+| 长文档翻译(论文 / 教材 / 手册) | `scenarios/translation.md` | 分块 + 术语 + manifest 续跑 + 覆盖检查 + 抽样复审 |
 
 > 用户问「这个 skill 怎么用」→ 读 `README.md` 首屏念给他。剧本里用 `$S` 指 scripts 目录(`~/.claude/skills/qwen-dual-model/scripts`)。
 > 下面各节是**机制参考**,日常按剧本走即可,不必通读。
@@ -28,11 +29,17 @@ allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 |---|---|---|
 | 长文本推理/推导/代码 | DeepSeek(主线) | — |
 | 读图(截图/数据图/手写公式/扫描件/论文插图) | **固定 Qwen** | `qwen_vision.mjs` |
-| 读 PDF | 文字→主模型;含图页→**固定 Qwen** | `pdf_read.mjs` |
+| 读 PDF 的**正文** | 本地文本层(零 API 成本) | `pdf_read.mjs --no-images` |
+| 读 PDF 的**图内文字 / 扫描页** | **固定 Qwen** | `pdf_read.mjs --ocr` |
 | 独立评审/对抗/复算 | **自动翻转**(非驱动方) | `qwen_review.mjs` |
 | 第二意见/会诊/头脑风暴 | **自动翻转**(非驱动方) | `qwen_ask.mjs` |
+| 批量任务前预检通道 | 两家各一次极短调用 | `canary.mjs` |
 
 > 视觉**固定**走 Qwen(口径统一,便于配图复核);评审/咨询**自动翻转**——理由见「评审角色翻转」。
+
+> ⚠️ **PDF 不是一个动作,是两类**:正文走本地文本层(免费、快、能覆盖全文);
+> 图内文字/扫描页才走视觉(按页计费)。**不要把整本 PDF 丢给视觉** —— 既慢又贵,
+> 还会漏掉它没"注意"到的正文。反过来只做文本层就会漏掉图里的英文(166 页翻译任务的实况)。
 
 ## 档位依据(跑分速查)
 
@@ -208,15 +215,24 @@ mode 分档(两家的档位都由 `model_roster.json` 推导,别手改):
 # 视觉:多图 + 一个问题,图按顺序编号(固定走 Qwen)
 node <skill>/scripts/qwen_vision.mjs <图片路径...> "<问题>"
 
-# PDF:自动提取文字 + 含图页转 PNG 喂视觉(优先用这个,不用开 Qwen 会话)
-node <skill>/scripts/pdf_read.mjs <pdf> [--pages 1-3] [--no-images] [--max-img-pages 4] ["图页检查重点"]
+# PDF:两条路,别混用 —— 正文走文本层(免费),图内文字才走视觉
+node <skill>/scripts/pdf_read.mjs <pdf> --no-images     # 只要正文,零 API 成本(批量翻译的起手式)
+node <skill>/scripts/pdf_read.mjs <pdf> --ocr           # 逐字提取图内文字/扫描页(不翻译,200 DPI)
+node <skill>/scripts/pdf_read.mjs <pdf> [--pages 1-3] [--max-img-pages 4] ["图页检查重点"]  # 默认:描述图表
 
 # 评审:四模式,评审方自动翻转(--json 出结构化结果;issues 仅 review/latex 有值)
 node <skill>/scripts/qwen_review.mjs review|challenge|recompute|latex <文件...> \
-     [--focus "本轮关注点"] [--context "领域背景"] [--json]
+     [--focus "本轮关注点"] [--context "领域背景"] [--json] [--budget 秒]
 
 # 自由咨询:会诊/头脑风暴/第二意见,咨询方自动翻转
-node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...]
+node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...] \
+     [--max-tokens N] [--timeout 秒] [--budget 秒]
+
+# 批量任务开跑前预检(2 秒,两家各一次极短调用;402/401 提前暴露)
+node <skill>/scripts/canary.mjs [--json] [--provider bailian|deepseek|both] [--budget 秒]
+
+# 翻译流水线的覆盖检查(只读、零成本:块是否齐、字数是否异常偏少、术语表是否变过)
+node <skill>/scripts/chunk_check.mjs <manifest.json> [--min-ratio 0.3] [--json]
 
 # PPT 排版检查的取图步:pptx → 每页 PNG(配合 scenarios/ppt.md;不需要 LibreOffice/poppler)
 python <skill>/scripts/slides_to_png.py <pptx> [输出目录] [--scale 2.0]
@@ -224,8 +240,9 @@ python <skill>/scripts/slides_to_png.py <pptx> [输出目录] [--scale 2.0]
 # 模型迭代通道:体检 / 生成配置 / 同步文档(仅模型升级时用,不耗 token;--probe 除外)
 node <skill>/scripts/model_audit.mjs [--render | --apply | --sync-docs [--write] | --probe]
 
-# 调用日志:耗时 / 首字节 / 成败(排查"慢在哪"、确认某次调用到底发出去没有)
+# 调用日志:耗时 / 首字节 / token / 估算费用
 node <skill>/scripts/show_calls.mjs [N] [--errors]
+node <skill>/scripts/show_calls.mjs --cost     # 按 厂商/模型 汇总 token 与费用
 ```
 
 - **`--context` 很关键**:不给则按通用标准评审;给了就按该领域的规范判。
@@ -261,12 +278,46 @@ node <skill>/scripts/show_calls.mjs [N] [--errors]
    所以"在回复里说明"这条协议从来没真正执行过。若驱动档是纯文本档,hook 会改口明说
    "本次视觉未执行,不要假装看到了图"。日志仍记 `FALLBACK`,并加 `driverVisionCapable` 字段标明当次判断。
    **hook 内的超时单独收紧**(2026-10-08 起,2026-10-21 更新):单次 **120s**、**超时重试 1 次** ——
-   三档超时统一在 `qwen_common.mjs` 的 `TIMEOUTS` 里(视觉/非流式 240s × 最多 3 次尝试、评审/咨询流式 900s 单次、
+   三档超时统一在 `qwen_common.mjs` 的 `TIMEOUTS` 里(视觉/非流式 240s、评审/咨询流式 900s、
    hook 120s 单次超时可重试 1 次)。旧版 90s 切在实测 p90=61s 的尾部(本批 45 次里失败 2 次均 90.01s 超时),
    120s 覆盖尾部分布;超时时重试 1 次避免偶发慢调用直接 fail-open;真超两次就 fail-open。
-   普通脚本调用最坏能等十几分钟,但 hook 是**阻塞主会话**的,不能按那个尺度等。
 3. 图片结论与代码输出矛盾时,以代码实际输出为准,让 Qwen 再确认一次
 4. 绝不因为外挂故障停止主线推理;绝不编造"Qwen 说…"的内容——没跑成功的调用,结果不存在
+
+### 失败路径的三条硬规则(2026-10-23 起)
+
+这一轮改造起因于一次 166 页翻译任务:Qwen 咨询空转 10 分钟零产出、402 中途断掉、
+日志里查不出花了多少 token。以下三条现在**由代码保证**,不靠自觉:
+
+**① 超时不重试(流式与非流式统一)。**
+超时意味着"这次生成本来就超过预算",重跑只会同样长。旧版只对流式如此,
+非流式超时照样重试 3 次 —— 日志里有一条 `durationMs: 726033`(240s × 3)就是它。
+现在任何超时都是**一次尝试即失败**。
+
+**② 总预算封顶 `budgetMs`(缺省 = 单次超时 + 120s)。**
+单次超时 × 重试次数会相乘成灾难(流式最坏 45 分钟)。现在每次尝试的定时器取
+`min(timeoutMs, 剩余预算)`,退避前也查剩余。调用方可用 `--budget 秒` 覆盖。
+- 非流式最坏 ~6 分钟(旧 12 分钟)
+- 流式最坏 ~17 分钟(旧 45 分钟)
+
+**③ 被掐断时返回部分结论,而不是空手而归。**
+`callReviewer`(即评审与咨询)默认 `allowPartial: true`:预算用尽时返回**已生成的正文**,
+并在末尾附 `[⚠️ 流式被截断(已生成 Ns),以上为部分结论]`。
+- `qwen_ask` / `qwen_review` 见到该尾注会向 stderr 告警,并**置退出码 2**
+- `qwen_review --json` 输出里带 `partial: true|false`
+- **消费方必须看这个字段**:截在 60% 的「总体结论:通过」不是通过
+- 反过来,**正文一个字都没生成**时仍算失败。特别是"思考了几万字、正文零字"(本次空转的形态)
+  会明确报 `模型思考了 N 字但未产出一字正文`,且**不重试** —— 重跑大概率还是同样结局
+
+**④ `max_tokens` 不是思考量的闸门。**
+实测推理模型的 `reasoning_content` 单独计,`max_tokens` 只约束正文。
+给太小会变成"思考耗尽预算、正文零字"。**要限时用 budget,不要指望 max-tokens。**
+(实测:给 32 时 deepseek-v4-pro 思考 57 字后因长度中止,正文零字)
+
+**⑤ 402 / 欠费给出可行动文案。**
+旧版只说"未知错误(402)"。现在识别 402 与"包装成 400/403 的欠费码"
+(`insufficient` / `quota` / `Arrearage` / `余额` / `欠费`),直接说去哪充值,
+并提示先跑 `canary.mjs`。402 不重试。
 
 ## 初始化(init)
 
@@ -317,6 +368,27 @@ Artificial Analysis 实测 Qwen3.8-Max 每任务约 **64 轮 vs 上代 14 轮**�
 
 → **长程 agent 任务不要放进 Qwen 会话**:输出价差 10 倍 × 轮次膨胀,长会话账单会很可观。
 → Qwen 会话留给**短程高价值视觉任务**(精读、复核、扫描件)—— 这也是"只在两种情况开 Qwen 会话"那条限定成立的量化理由。
+
+### 怎么量(2026-10-23 起)
+
+价格表只是参考,**实际花了多少现在能查**:
+
+```bash
+node <skill>/scripts/show_calls.mjs --cost     # 按 厂商/模型 汇总 token 与估算费用
+node <skill>/scripts/show_calls.mjs 20         # 逐条看:输入/输出 token、≈$、是否截断
+```
+
+- 费用按 `model_roster.json` 的 `pricePerM` 算,**是估算不是账单**
+- 老条目(2026-10-23 之前)没有 usage 字段,显示 `-` —— 汇总时会单独报"未计量 N 条",
+  **别把"可计量部分"当成全部花费**
+- 流式调用的 usage 靠 `stream_options.include_usage`;某家网关不支持时会自动降级并提示一次
+
+**批量任务的三条省钱纪律**(来自 166 页翻译任务的实测):
+1. **开跑前先 `canary.mjs`** —— 2 秒,402/401 提前暴露,别跑到一半断
+2. **正文走本地文本层,不要走视觉** —— 差三个数量级
+3. **复审只抽样 10–20%** —— 全量复审是在为"安心"付 10 倍价钱
+
+> 完整流水线见 `scenarios/translation.md`。
 
 ## 已知风险:Qwen 的幻觉率
 

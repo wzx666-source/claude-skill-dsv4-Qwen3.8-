@@ -26,6 +26,7 @@ export const TIMEOUTS = {
   nonStream: 240_000,   // 非流式(视觉等):视觉调用方差大(实测 10~70s+),留足余量
   stream:    900_000,   // 流式长生成(评审/咨询):实测 214~609s 不等,单次上限留冗余
   hook:      120_000,   // hook 内(PreToolUse):单次 120s(旧 90s 切在 p90=61s 尾部;流式下首 token 约 2s,误杀率低)
+  retrySlack: 120_000,  // 单次超时之外留给"重试"的总预算余量(见 callModel 的 budgetMs)
 };
 
 /**
@@ -95,6 +96,13 @@ const LOG_FILE = path.join(LOG_DIR, 'calls.jsonl');
  *   ok           本次调用是否成功
  *   durationMs   从发出请求到拿到结果的总毫秒数
  *   error        失败时的错误摘要(前 120 字符)
+ *   promptTokens / completionTokens / reasoningTokens
+ *                服务端回报的用量;服务端没回(或老版本接口)时缺省。
+ *                show_calls.mjs 据此算费用,**缺字段显示 `-` 而不是 0** ——
+ *                0 会被读成"这次几乎免费",那是错的信息
+ *   partial      流式被截断但仍返回了部分正文(调用方显式 allowPartial 时)
+ *   reasonChars  思考链字符数(无正文空转时,这是唯一能说明"它到底干了什么"的线索)
+ *   budgetMs     本次调用的总预算(超时 × 重试的封顶)
  */
 function appendCallLog(entry) {
   try {
@@ -276,13 +284,33 @@ export function reviewerMeta(messages = [], { mode = '' } = {}) {
 /** 把 API 错误翻译成可行动的提示 */
 export function classifyError(status, payload, providerName = 'bailian') {
   const p = PROVIDERS[providerName];
+  const msg = JSON.stringify(payload?.error || payload || '').toLowerCase();
+  // 余额类必须**排在** model 之前判:DashScope 的 "Allocated quota exceeded"、欠费码
+  // `Arrearage` 常被包成 400/403,而 "quota" 里也含 "model" 之外的干扰词;
+  // 排在后面就会被 401/403 分支或 /model/ 分支先截走,报出完全误导的"检查模型名"。
+  const quotaish = /insufficient|quota|balance|arrearage|欠费|余额|额度/.test(msg);
+  if (quotaish || status === 402) {
+    return `${p.label} 余额不足/额度用尽 → 到控制台充值后重跑;`
+      + `批量任务开跑前先 node scripts/canary.mjs 预检(几秒),别等跑到一半才 402`;
+  }
   if (status === 401 || status === 403) return `API key 无效或过期 → 到 CC Switch 检查「${p.label}」的 key`;
   if (status === 429) return `${p.label} 限流(429) → 稍后重试`;
-  const msg = JSON.stringify(payload?.error || payload || '').toLowerCase();
   if (msg.includes('model')) return `模型不可用 → 检查模型名(当前 ${pickModel(providerName)}),确认账号已开通该模型`;
   if (status >= 500) return `${p.label} 服务端错误(${status}) → 稍后重试`;
   return `未知错误(${status}): ${String(msg).slice(0, 200)}`;
 }
+
+/** 额度耗尽/限流这类"重试也没用或要等很久"的状态 */
+function isRetryableStatus(status) {
+  return status === 429 || status >= 500;
+}
+
+/**
+ * 不支持 stream_options 的 provider(流式用量统计的降级开关)。
+ * 按 provider 记而不是全局:两家网关是独立实现,一家不认不代表另一家也不认。
+ * 一旦降级就不再发送该字段 —— 否则每次调用都要先吃一个 400 再重试。
+ */
+const STREAM_USAGE_UNSUPPORTED = new Set();
 
 /**
  * 读取 OpenAI 兼容 SSE 流(stream:true),把 delta.content 拼成完整正文。
@@ -292,37 +320,59 @@ export function classifyError(status, payload, providerName = 'bailian') {
  * 流式下响应头约 2s 即到、生成期间持续有数据,只剩调用方 AbortController 一层约束。
  * reasoning_content(推理模型的思考链)不计入正文,只拼接 content;但会计数,
  * 用于每 20s 向 stderr 打一次进度心跳 —— 长生成不再是黑盒,stdout 契约不受影响。
+ *
+ * **中止不再丢正文**:读循环包在 try/catch 里,abort 时把已累积的 content 连同
+ * `aborted:true` 一起返回。此前 `content` 是局部变量、abort 直接抛出函数,
+ * 于是"生成到 80% 被掐掉"= 一个字都拿不回来 —— 这是本次翻译任务里最贵的一种浪费。
+ * 是否把部分结果交给调用方由 callModel 决定(要显式 allowPartial),这里只如实报告。
+ *
+ * usage:百炼/DeepSeek 兼容接口在流式下需请求体带 stream_options.include_usage,
+ * 末帧会带一个 choices 为空、只有 usage 的 chunk。拿到就记,拿不到就是 null。
  */
 async function readSSE(body) {
   const reader = body.getReader();
   const dec = new TextDecoder();
   const t0 = Date.now();
   let buf = '', content = '', model = '', streamErr = '', reasonChars = 0, lastTick = Date.now();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() ?? '';
-    for (const line of lines) {
-      const s = line.trim();
-      if (!s.startsWith('data:')) continue;
-      const payload = s.slice(5).trim();
-      if (payload === '[DONE]') continue;
-      let j;
-      try { j = JSON.parse(payload); } catch { continue; }
-      if (j.error) { streamErr = JSON.stringify(j.error).slice(0, 200); continue; }
-      if (j.model) model = j.model;
-      const d = j.choices?.[0]?.delta;
-      if (d?.reasoning_content) reasonChars += d.reasoning_content.length;
-      if (d?.content) content += d.content;
+  let usage = null, aborted = false, finishReason = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        const s = line.trim();
+        if (!s.startsWith('data:')) continue;
+        const payload = s.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let j;
+        try { j = JSON.parse(payload); } catch { continue; }
+        if (j.error) { streamErr = JSON.stringify(j.error).slice(0, 200); continue; }
+        if (j.model) model = j.model;
+        if (j.usage) usage = j.usage;
+        const ch = j.choices?.[0];
+        if (ch?.finish_reason) finishReason = ch.finish_reason;
+        const d = ch?.delta;
+        if (d?.reasoning_content) reasonChars += d.reasoning_content.length;
+        if (d?.content) content += d.content;
+      }
+      if (Date.now() - lastTick >= 20000) {
+        lastTick = Date.now();
+        process.stderr.write(`⏳ 流式生成中 ${Math.round((Date.now() - t0) / 1000)}s(思考约 ${reasonChars} 字)\n`);
+      }
     }
-    if (Date.now() - lastTick >= 20000) {
-      lastTick = Date.now();
-      process.stderr.write(`⏳ 流式生成中 ${Math.round((Date.now() - t0) / 1000)}s(思考约 ${reasonChars} 字)\n`);
-    }
+  } catch (e) {
+    // AbortError = 调用方超时掐断;其它读错误(连接重置)同样只意味着"没法继续读",
+    // 已拿到的正文依然有效 —— 一律降级为"带部分结果返回",不连正文一起丢掉。
+    aborted = true;
+    if (e.name !== 'AbortError') streamErr = streamErr || `流读取中断: ${e.message}`;
+  } finally {
+    // 主动 cancel:不取消的话 undici 的 socket 会挂到进程退出,Windows 上撞 libuv 断言
+    try { await reader.cancel(); } catch {}
   }
-  return { content, model, streamErr };
+  return { content, model, streamErr, usage, reasonChars, aborted, finishReason, elapsedMs: Date.now() - t0 };
 }
 
 /**
@@ -336,20 +386,56 @@ async function readSSE(body) {
  *            undici 隐藏的 300s headersTimeout,表现为"卡死零输出 + fetch failed"
  * returnMeta 返回 { content, model } 而非纯字符串;model 取自响应体回显,
  *            是识别"别名/重定向"的唯一可靠手段(见 self_test.mjs 溯源探针)
+ * budgetMs   本次调用的**总**墙钟预算(含所有重试)。缺省 = timeoutMs + TIMEOUTS.retrySlack。
+ *            没有它的话,"单次 240s × 最多 3 次尝试"就是 12 分钟,流式更是 45 分钟 ——
+ *            实测日志里已有一条 726033ms 的失败记录(240s × 3),就是缺这层封顶。
+ *            每轮尝试的定时器取 min(timeoutMs, 剩余预算),退避前也查一次剩余。
+ * allowPartial  流式被中止时,若已生成正文,返回它而不是抛错。**默认关闭**:
+ *            把截断结果当成功返回会让调用方(如 pdf_read 的逐页 try/catch)把
+ *            半页 OCR 当完整页面用,甚至写进缓存。只有明确接受"可能是半截"的
+ *            调用方(咨询/评审)才该打开。
+ *
+ * 超时**不重试**(流式与非流式统一):超时意味着这次生成本来就超过预算,
+ * 重跑只会同样长。此前只有流式分支做了这件事,非流式超时照样重试 3 次。
  */
-export async function callModel(messages, { provider = 'bailian', model, mode = '', timeoutMs, retries = 2, returnMeta = false, stream = false, maxTokens } = {}) {
+export async function callModel(messages, {
+  provider = 'bailian', model, mode = '', timeoutMs, retries = 2,
+  returnMeta = false, stream = false, maxTokens, budgetMs, allowPartial = false,
+} = {}) {
   if (!PROVIDERS[provider]) throw new Error(`未知 provider: ${provider}`);
   if (timeoutMs == null) timeoutMs = stream ? TIMEOUTS.stream : TIMEOUTS.nonStream;
+  if (budgetMs == null) budgetMs = timeoutMs + TIMEOUTS.retrySlack;
   const t0 = Date.now();
+  const deadline = t0 + budgetMs;
   const useModel = model || pickModel(provider, { hasImages: hasImageContent(messages), mode });
   const key = loadKey(provider);
+  const budgetSec = Math.round(budgetMs / 1000);
   let lastErr = '';
   let firstByteMs = null;
+  let usage = null;
+  let attemptsMade = 0;
+
+  /** 退避:带抖动(批量并发时同时重试会二次撞限流);超预算就不再睡 */
+  async function backoff(attempt) {
+    const wait = 2000 * (attempt + 1) + Math.floor(Math.random() * 1000);
+    if (Date.now() + wait >= deadline) return false;
+    await new Promise(r => setTimeout(r, wait));
+    return true;
+  }
+
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining < 5000) {
+      lastErr = lastErr || `已超出总预算 ${budgetSec}s`;
+      lastErr = `${lastErr}(已尝试 ${attemptsMade} 次,总预算 ${budgetSec}s 用尽)`;
+      break;
+    }
+    const thisTimeout = Math.min(timeoutMs, remaining);
+    attemptsMade++;
     // 用 AbortController 而非 AbortSignal.timeout:确保失败退出时定时器已清理
     // (Windows 上 pending 的 timeout handle 会在 process.exit 时触发 libuv 断言崩溃)
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), thisTimeout);
     try {
       const res = await fetch(PROVIDERS[provider].endpoint, {
         method: 'POST',
@@ -358,6 +444,7 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
         body: JSON.stringify({
           model: useModel, messages,
           ...(stream ? { stream: true } : {}),
+          ...(stream && !STREAM_USAGE_UNSUPPORTED.has(provider) ? { stream_options: { include_usage: true } } : {}),
           ...(maxTokens ? { max_tokens: maxTokens } : {}),
         }),
       });
@@ -365,47 +452,93 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
       if (stream) {
         if (!res.ok) {
           const j = await res.json().catch(() => ({}));
-          lastErr = classifyError(res.status, j, provider);
-          if (res.status === 429 || res.status >= 500) {
-            if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          // stream_options 被拒(400/422):降级一次,之后该 provider 不再发送该字段
+          if ((res.status === 400 || res.status === 422)
+              && /stream_options|include_usage|unrecognized|unknown (field|parameter)/i.test(JSON.stringify(j))) {
+            if (!STREAM_USAGE_UNSUPPORTED.has(provider)) {
+              STREAM_USAGE_UNSUPPORTED.add(provider);
+              process.stderr.write(`ℹ️  ${PROVIDERS[provider].label} 不支持 stream_options,已关闭流式用量统计(费用列将显示 -)\n`);
+            }
+            attempt--;          // 这次不算数:不是模型的错,也不该消耗重试次数
             continue;
           }
-          break; // 401/403/model 错误重试无意义
+          lastErr = classifyError(res.status, j, provider);
+          if (isRetryableStatus(res.status)) { if (attempt < retries) { if (!await backoff(attempt)) break; } continue; }
+          break; // 401/403/model/402 重试无意义
         }
-        const { content, model: streamModel, streamErr } = await readSSE(res.body);
-        if (content) {
-          appendCallLog({ provider, model: streamModel || useModel, mode, stream, ok: true, durationMs: Date.now() - t0, firstByteMs });
-          return returnMeta ? { content, model: streamModel || useModel } : content;
+        if (!res.body) { lastErr = '响应无正文流'; break; }
+        const r = await readSSE(res.body);
+        usage = r.usage;
+        const streamModel = r.model || useModel;
+        if (r.content) {
+          // 有正文:正常返回。被截断时是否接受由 allowPartial 决定。
+          const partial = r.aborted && r.elapsedMs >= thisTimeout - 1000;
+          if (partial && !allowPartial) {
+            lastErr = `流式输出被截断(已生成 ${Math.round(r.elapsedMs / 1000)}s / ${r.content.length} 字)`;
+            const err = new Error(`${PROVIDERS[provider].label} ${lastErr}:超时中止,已生成的内容未达完整;`
+              + `如需接受半截结果请传 allowPartial`);
+            err.partialContent = r.content;
+            err.partial = true;
+            appendCallLog({ provider, model: streamModel, mode, stream, ok: false, durationMs: Date.now() - t0, firstByteMs,
+              promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens,
+              reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens,
+              reasonChars: r.reasonChars, budgetMs, error: lastErr.slice(0, 120) });
+            throw err;
+          }
+          appendCallLog({ provider, model: streamModel, mode, stream, ok: true, durationMs: Date.now() - t0, firstByteMs,
+            promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens,
+            reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens,
+            reasonChars: r.reasonChars, partial: partial || undefined, budgetMs });
+          if (returnMeta) return { content: r.content, model: streamModel, partial, reasonChars: r.reasonChars, usage };
+          return partial
+            ? r.content + `\n\n[⚠️ 流式被截断(已生成 ${Math.round(r.elapsedMs / 1000)}s),以上为部分结论]`
+            : r.content;
         }
-        lastErr = streamErr || '流式响应为空';
-        if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        // 无正文:区分"预算被思考吃光"与"真的空转"
+        if (r.reasonChars > 0) {
+          if (r.finishReason === 'length') {
+            // max_tokens 太小,推理模型把预算全花在 reasoning 上,正文一个 token 都没轮到。
+            // 这是**参数配错**,不是通道故障 —— 报"陷入无效推理"会把人引向错误的方向。
+            lastErr = `思考耗尽 max_tokens(思考 ${r.reasonChars} 字 / ${usage?.completion_tokens_details?.reasoning_tokens ?? '?'} tok 后因长度上限中止,正文未开始)`
+              + ` → 调大 --max-tokens,或去掉该参数`;
+            break;
+          }
+          // 思考了却没吐一个字 —— 重跑大概率还是同样的结局,不浪费重试
+          lastErr = `模型思考了 ${r.reasonChars} 字但未产出一字正文(疑似陷入无效推理)`;
+          break;
+        }
+        lastErr = r.streamErr || '流式响应为空';
+        if (attempt < retries) { if (!await backoff(attempt)) break; }
         continue;
       }
       const j = await res.json().catch(() => ({}));
       if (j.choices && j.choices[0]) {
         const content = j.choices[0].message.content;
-        appendCallLog({ provider, model: j.model || useModel, mode, stream, ok: true, durationMs: Date.now() - t0, firstByteMs });
-        return returnMeta ? { content, model: j.model || useModel } : content;
+        usage = j.usage || null;
+        appendCallLog({ provider, model: j.model || useModel, mode, stream, ok: true, durationMs: Date.now() - t0, firstByteMs,
+          promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens,
+          reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens, budgetMs });
+        return returnMeta ? { content, model: j.model || useModel, partial: false, usage } : content;
       }
       lastErr = classifyError(res.status, j, provider);
-      if (res.status === 429 || res.status >= 500) {
-        if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-        continue;
-      }
-      break; // 401/403/model 错误重试无意义
+      if (isRetryableStatus(res.status)) { if (attempt < retries) { if (!await backoff(attempt)) break; } continue; }
+      break; // 401/403/model/402 重试无意义
     } catch (e) {
-      lastErr = e.name === 'AbortError'
-        ? `超时(>${Math.round(timeoutMs / 1000)}s)被中止`
-        : `网络请求失败: ${e.message}`;
-      // 流式长生成超时后重试无意义(重跑同样久):直接失败,错误里带清晰原因
-      if (stream && e.name === 'AbortError') break;
-      if (attempt < retries) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      if (e.partial) throw e;   // 上面刚构造的"截断且不接受部分结果",别被下面的 catch 改写
+      // 超时 = 这次生成本来就超过预算,重跑只会同样长 → 一律不重试(旧版只对流式如此)
+      if (e.name === 'AbortError') {
+        lastErr = `超时(>${Math.round(thisTimeout / 1000)}s)被中止`;
+        break;
+      }
+      lastErr = `网络请求失败: ${e.message}`;
+      if (attempt < retries) { if (!await backoff(attempt)) break; }
     } finally {
       clearTimeout(timer);
     }
   }
-  appendCallLog({ provider, model: useModel, mode, stream, ok: false, durationMs: Date.now() - t0, firstByteMs, error: lastErr.slice(0, 120) });
-  throw new Error(`${PROVIDERS[provider].label} 调用失败(已重试 ${retries} 次): ${lastErr}`);
+  appendCallLog({ provider, model: useModel, mode, stream, ok: false, durationMs: Date.now() - t0, firstByteMs,
+    budgetMs, error: lastErr.slice(0, 120) });
+  throw new Error(`${PROVIDERS[provider].label} 调用失败(已尝试 ${attemptsMade} 次): ${lastErr}`);
 }
 
 /**
@@ -423,10 +556,15 @@ export async function callQwen(messages, opts = {}) {
  * opts 会原样透传给 callModel,故 mode / returnMeta / stream 均可用。
  * 默认流式:评审与咨询(qwen_ask 同样走本通道)都是长生成,非流式会撞 undici
  * 隐藏的 300s headersTimeout 而"卡死零输出"(见 callModel 注释);显式 stream:false 可回退。
+ *
+ * 默认 **allowPartial: true**:评审/咨询被预算掐断时,半份意见比"什么都没有"有用得多
+ * (这是本次任务里 Qwen 空转 10 分钟零产出的直接教训)。调用方拿到的是带
+ * 「[⚠️ 流式被截断…]」尾注的正文,或 returnMeta 下的 `partial: true` —— 必须据此
+ * 标明"这是部分结论",不能当完整评审用。
  */
 export async function callReviewer(messages, opts = {}) {
   const provider = peerProviderName();
-  return callModel(messages, { stream: true, ...opts, provider });
+  return callModel(messages, { stream: true, allowPartial: true, ...opts, provider });
 }
 
 /** 读文本文件,超限截断并标注(防止超大文件撑爆请求) */

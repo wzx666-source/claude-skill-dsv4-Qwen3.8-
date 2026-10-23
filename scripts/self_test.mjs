@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   callQwen, callModel, callReviewer, loadKey, imageBlock, CC_SWITCH_DB,
   activeProviderName, peerProviderName, reviewerMeta, pickModel, PROVIDERS,
-  MODEL_ALIAS_PROBE, resolvedTiers, TIMEOUTS,
+  MODEL_ALIAS_PROBE, resolvedTiers, TIMEOUTS, classifyError,
 } from './qwen_common.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -266,8 +266,12 @@ try {
   // 使用 callReviewer(走流式+翻转通道),设较短超时以控制自检时间(冒烟不求完整生成)
   const smoke = await callReviewer(reviewMsg, { mode: 'review', timeoutMs: 120_000 });
   const hasVerdict = /总体结论/.test(smoke);
+  const isPartial = /\[⚠️ 流式被截断/.test(smoke);
   check('评审通道冒烟(callReviewer + 流式 + 翻转)', typeof smoke === 'string' && smoke.length > 10,
     hasVerdict ? `首行包含「总体结论」(${smoke.split('\n')[0].trim().slice(0, 50)})` : `长度 ${smoke.length},首行未含「总体结论」`);
+  if (isPartial) {
+    console.log('   ⚠️  本次冒烟返回的是**部分结论**(被预算截断)—— 通道是通的,但生成没走完');
+  }
   if (!hasVerdict) {
     console.log('   ⚠️  首行格式不符,评审输出可能有变化;用 --json 模式消费时注意容错');
   }
@@ -276,9 +280,69 @@ try {
 }
 
 // 18. TIMEOUTS 常量存在且值合理(确保集中化后没有漏掉)
-check('TIMEOUTS 常量:nonStream/stream/hook 都已导出',
-  typeof TIMEOUTS?.nonStream === 'number' && typeof TIMEOUTS?.stream === 'number' && typeof TIMEOUTS?.hook === 'number',
-  `nonStream=${TIMEOUTS?.nonStream}ms stream=${TIMEOUTS?.stream}ms hook=${TIMEOUTS?.hook}ms`);
+check('TIMEOUTS 常量:nonStream/stream/hook/retrySlack 都已导出',
+  ['nonStream', 'stream', 'hook', 'retrySlack'].every(k => typeof TIMEOUTS?.[k] === 'number'),
+  `nonStream=${TIMEOUTS?.nonStream}ms stream=${TIMEOUTS?.stream}ms hook=${TIMEOUTS?.hook}ms retrySlack=${TIMEOUTS?.retrySlack}ms`);
+
+// 19. 超时**不重试**(2026-10-23 修:非流式超时原本会重试 3 次,实测日志里有一条 726033ms
+//     = 240s × 3。超时意味着"这次生成本来就超预算",重跑只会同样长。)
+//     用 timeoutMs:1 触发:只应尝试 1 次、耗时远小于任何重试组合。
+try {
+  const t0 = Date.now();
+  let err = null;
+  try {
+    await callModel([{ role: 'user', content: 'hi' }], { provider: 'bailian', timeoutMs: 800, budgetMs: 60_000 });
+  } catch (e) { err = e; }
+  const elapsed = Date.now() - t0;
+  const oneAttempt = /已尝试 1 次/.test(err?.message ?? '');
+  check('超时只尝试 1 次(不重试)', !!err && oneAttempt && elapsed < 20_000,
+    err ? `${elapsed}ms｜${err.message.slice(0, 60)}` : '未超时(网络太快,本次判据不成立)');
+} catch (e) {
+  check('超时只尝试 1 次(不重试)', false, e.message.slice(0, 80));
+}
+
+// 20. 总预算封顶:budgetMs 小于单次超时时,应在预算处停下,而不是跑满 timeoutMs
+try {
+  const t0 = Date.now();
+  let err = null;
+  try {
+    await callModel([{ role: 'user', content: 'hi' }], { provider: 'bailian', timeoutMs: 60_000, budgetMs: 700 });
+  } catch (e) { err = e; }
+  const elapsed = Date.now() - t0;
+  check('总预算 budgetMs 生效(不会跑满单次超时)', !!err && elapsed < 20_000,
+    err ? `${elapsed}ms(单次超时设 60s,预算 0.7s)` : '未触发(异常)');
+} catch (e) {
+  check('总预算 budgetMs 生效(不会跑满单次超时)', false, e.message.slice(0, 80));
+}
+
+// 21. 402 / 欠费文案可行动(纯函数,零 token)
+//     旧版对 402 只报"未知错误(402)",批量任务中途撞上时完全不知道该干什么。
+const e402 = classifyError(402, {});
+const eQuota400 = classifyError(400, { error: { code: 'Arrearage', message: 'Allocated quota exceeded' } });
+check('错误分类:402 与"欠费包装成 400"都给出充值指引',
+  /余额|充值/.test(e402) && /余额|充值/.test(eQuota400) && /canary/.test(e402),
+  e402.slice(0, 50));
+
+// 22. canary 预检可执行且能正确识别两家(真实调用,但很小)
+try {
+  const r = spawnSync(process.execPath, [path.join(__dirname, 'canary.mjs'), '--json'], { encoding: 'utf8', timeout: 120_000 });
+  let j = null;
+  try { j = JSON.parse(r.stdout); } catch {}
+  check('canary 预检:两家通道都通', !!j && j.ok === true && r.status === 0,
+    j ? Object.values(j.providers).map(p => `${p.provider}:${p.state}`).join(' ') : (r.stderr || r.stdout).slice(0, 80));
+} catch (e) {
+  check('canary 预检:两家通道都通', false, e.message.slice(0, 80));
+}
+
+// 23. usage 采集(流式 stream_options):拿不到就说明费用列会一直是 `-`
+try {
+  const r = await callModel([{ role: 'user', content: '只回复两个字母:OK' }],
+    { provider: 'bailian', stream: true, returnMeta: true, timeoutMs: 120_000 });
+  check('usage 采集(流式)', r.usage?.prompt_tokens != null && r.usage?.completion_tokens != null,
+    r.usage ? `in ${r.usage.prompt_tokens} / out ${r.usage.completion_tokens}` : '未返回 usage(费用列将显示 -)');
+} catch (e) {
+  check('usage 采集(流式)', false, e.message.slice(0, 80));
+}
 
 // 汇总
 const failed = results.filter(r => !r.ok);

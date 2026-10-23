@@ -5,7 +5,7 @@
 
 ## 我在做什么?(从这里开始)
 
-**先按任务找入口** —— 四份任务剧本在 [`scenarios/`](scenarios/),每份都带可复制的命令:
+**先按任务找入口** —— 五份任务剧本在 [`scenarios/`](scenarios/),每份都带可复制的命令:
 
 | 我在做 | 读哪份剧本 | 这份剧本管什么 |
 |---|---|---|
@@ -13,6 +13,7 @@
 | **PPT**(课程汇报 / 答辩) | [`scenarios/ppt.md`](scenarios/ppt.md) | **答辩 PPT 终稿检查**:讲稿评审 + 逐张排版视觉检查(不做 PPT 本体) |
 | **数学建模竞赛**(CUMCM / MCM / 电工杯) | [`scenarios/contest.md`](scenarios/contest.md) | **竞赛插图与数值复核**:10 阶段挂载点 + AI 声明一致性 |
 | **科研**(文献 / 实验 / 论文) | [`scenarios/research.md`](scenarios/research.md) | **论文插图复核与终稿评审**:PDF 图页精读 + 插图复核 + 跨厂商终审 |
+| **长文档翻译**(论文 / 教材 / 手册) | [`scenarios/translation.md`](scenarios/translation.md) | **翻译流水线**:canary 预检 + 分块 + 术语 + manifest 续跑 + 覆盖检查 + 抽样复审 |
 
 **不按任务**、只想直接调某个能力:
 
@@ -68,7 +69,7 @@ node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 
 | 文件 | 给谁 | 是什么 | 权威 / 副本 |
 |---|---|---|---|
-| `scenarios/*.md` | 用户 + Claude | 四份任务剧本(按任务组织的入口) | **权威**(任务用法) |
+| `scenarios/*.md` | 用户 + Claude | 五份任务剧本(按任务组织的入口) | **权威**(任务用法) |
 | `SKILL.md` | Claude(自动加载) | 机制参考:分工、路由、脚本用法、降级 | **权威**(机制) |
 | `README.md`(本文) | 用户 | 入口 + 文档地图 + 安装 | — |
 | [`USAGE.md`](USAGE.md) | 用户 | 命令手册:触发方式、**哪 7 种情况必须手动调用**、四个 mode 怎么选、`--context` 心法 | **权威**(手调细节) |
@@ -135,16 +136,18 @@ node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 | 脚本 | 能力 | 一句话用法 |
 |---|---|---|
 | `qwen_vision.mjs` | 读图/手写公式转 LaTeX/数据图检查 | `node $S/qwen_vision.mjs <图片...> "<问题>"` |
-| `pdf_read.mjs` | PDF 文字提取 + 含图页自动视觉 | `node $S/pdf_read.mjs <pdf>` |
-| `qwen_review.mjs` | 独立评审:review / challenge / recompute / latex | `node $S/qwen_review.mjs review <文件...> [--context "..."] [--json]` |
-| `qwen_ask.mjs` | 第二意见/会诊/头脑风暴 | `node $S/qwen_ask.mjs "<问题>" [--file 附件]` |
+| `pdf_read.mjs` | PDF **正文**走文本层(零成本)/**图内文字**走视觉 OCR | `node $S/pdf_read.mjs <pdf> --no-images` 或 `--ocr` |
+| `qwen_review.mjs` | 独立评审:review / challenge / recompute / latex | `node $S/qwen_review.mjs review <文件...> [--context "..."] [--json] [--budget 秒]` |
+| `qwen_ask.mjs` | 第二意见/会诊/头脑风暴 | `node $S/qwen_ask.mjs "<问题>" [--file 附件] [--budget 秒]` |
 | `qwen_read_hook.mjs` | Read 工具自动路由(图片→Qwen;Qwen 会话让行) | 合并 `templates/hooks.settings.json` |
+| `canary.mjs` | **批量任务前预检**:2 秒确认两家通道通不通(402/401 提前暴露) | `node $S/canary.mjs [--json]` |
+| `chunk_check.mjs` | **翻译流水线覆盖检查**:块是否齐、字数是否偏少、术语表是否变过 | `node $S/chunk_check.mjs <manifest.json>` |
 | `model_audit.mjs` | **模型迭代通道**:档位体检/生成/文档同步 | `node $S/model_audit.mjs [--apply\|--sync-docs\|--render\|--probe]` |
 | `slides_to_png.py` | pptx → 每页 PNG(PPT 剧本用;绕开缺失的 LibreOffice/poppler) | `python $S/slides_to_png.py <pptx>` |
 | `self_test.mjs` | 全链路自检 | `node $S/self_test.mjs` |
-| `show_calls.mjs` | 看最近的调用日志(耗时/首字节/成败) | `node $S/show_calls.mjs [N] [--errors]` |
+| `show_calls.mjs` | 调用日志:耗时/首字节/**token/估算费用** | `node $S/show_calls.mjs [N] [--errors] [--cost]` |
 
-参数细节、输入上限(图 6 张/8MB、文本 200KB)、四个 mode 的选择心法 → [USAGE.md](USAGE.md) 与 `SKILL.md`「脚本用法」。
+参数细节、输入上限(图 6 张/8MB、文本 200KB)、预算与部分结论的语义、四个 mode 的选择心法 → [USAGE.md](USAGE.md) 与 `SKILL.md`「脚本用法」。
 
 ## 环境要求
 
@@ -171,7 +174,12 @@ node ~/.claude/skills/qwen-dual-model/scripts/self_test.mjs
 | 体检报"档位漂移" | 改了 `model_roster.json` 没 `--apply`;或处于 `freezeUntil` 冻结期(属预期)。跑 `--apply` 或等解冻 |
 | 体检报"文档漂移" | 档位变了但文档标记块没同步 → `node $S/model_audit.mjs --sync-docs --write` |
 | `图片过大` | 单图限 8MB,压缩后再传 |
-| 视觉调用偶发超时 | 单次超时 240s、自动重试 2 次(最坏约 12 分钟;**hook 内收紧为单次 120s 超时重试 1 次**);仍失败按降级规则处理 |
+| `额度不足 / 402` | 报错会直接指出要充值;批量任务开跑前先 `node $S/canary.mjs`(2 秒)预检 |
+| 调用超时 | **超时不重试**(2026-10-23 起)。非流式单次 240s、流式 900s,另有"单次超时 + 120s"的总预算封顶;`--budget 秒` 可覆盖。hook 内收紧为 120s + 超时重试 1 次 |
+| 输出末尾有「[⚠️ 流式被截断…]」 | 被预算掐断,**不是完整结论**;退出码为 2。加大 `--budget` 重跑 |
+| `模型思考了 N 字但未产出一字正文` | 典型空转,已不重试。换问法或改用结构化提问 |
+| `思考耗尽 max_tokens` | `--max-tokens` 太小;推理模型的思考量不受它约束,调大或去掉,要限时用 `--budget` |
+| 想知道花了多少 | `node $S/show_calls.mjs --cost`(估算,非账单;老日志无 usage 会单列"未计量") |
 | 评审方不是预期的那家 | 检查 CC Switch 当前 provider;或 `DRIVER_PROVIDER=bailian\|deepseek` 强制指定 |
 | hook 不生效 | 确认 hook 配置(项目 `.claude/settings.json` 或**全局** `~/.claude/settings.json`,本机是全局);新开会话生效;看 `~/.claude/hooks-logs/` 当天日志(该目录也混有其它 hook 的 `BLOCKED` 记录,别误读) |
 | 找不到 CC Switch 数据库 | 脚本自动读 `~/.cc-switch/cc-switch.db`;或直接 `QWEN_API_KEY` / `DEEPSEEK_API_KEY` 环境变量绕过 |
