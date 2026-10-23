@@ -14,9 +14,35 @@
 //   - 每次路由写入 hooks-logs,可事后排查
 import path from 'node:path';
 import fs from 'node:fs';
-import { callQwen, imageBlock, IMAGE_EXTS, activeProviderName, driverVisionCapable, TIMEOUTS } from './qwen_common.mjs';
+import { callQwen, imageBlock, IMAGE_EXTS, activeProviderName, driverVisionCapable, TIMEOUTS, visionCacheGet, visionCacheSet } from './qwen_common.mjs';
 
-const VISION_PROMPT = '详细描述这张图片的全部信息:文字内容、数值、图表结构、坐标轴含义、数据趋势、异常点、公式。信息尽量完整准确,供后续推理直接使用。';
+// hook 专用精简 prompt —— 与手动 qwen_vision.mjs 的完整版分开:
+// 旧 prompt 要求"图表结构、坐标轴、数据趋势、异常点、公式",对幻灯片大半是空话("无坐标轴"),
+// 每页仍生成 1-2k 字,是这次(10-19~21 PPT 任务)上下文被压缩的直接推手。hook 跑在 PreToolUse 里,
+// 只给主模型一个"能据此判断"的摘要即可;要完整描述走手动 qwen_vision.mjs。
+// 按图片类型分档:幻灯片预览(preview/slide 命名)只报排版四项;其他图(图/表/手写)给精简通用描述。
+const SLIDE_HINT = /preview|slide|s\d{2,3}\b/i;
+const HOOK_PROMPT_SLIDE = '这是一张幻灯片预览。只报告:① 文字内容(逐字)② 文字是否溢出或被遮挡 ③ 元素对齐 ④ 配图占比与留白。不要描述"坐标轴/数据趋势/异常点/公式"这类幻灯片通常没有的项;简明扼要,不要空话。';
+const HOOK_PROMPT_GENERIC = '简要描述这张图片:文字内容(逐字)、数值、若为图表则说明结构与坐标轴。只报实际存在的内容,不要为缺失项写空话。简明扼要。';
+const HOOK_MAX_TOKENS = 500;   // 配合精简 prompt,从无上限的 1-2k 字压到 ~500 token,既省上下文又省时
+
+function hookPrompt(abs) {
+  return SLIDE_HINT.test(abs) ? HOOK_PROMPT_SLIDE : HOOK_PROMPT_GENERIC;
+}
+
+// 同目录幻灯片张数 ≥4 时,提示改用 qwen_vision 批量(逐张 Read 走的是最慢的那条路)。
+// 纯文件系统判断,无状态、无跨进程记录,够用且零成本。
+function batchHint(abs) {
+  if (!SLIDE_HINT.test(abs)) return '';
+  const dir = path.dirname(abs);
+  try {
+    const sibs = fs.readdirSync(dir).filter(f => /\.(png|jpe?g|webp|bmp)$/i.test(f));
+    if (sibs.length >= 4) {
+      return `\n\n💡 这批幻灯片预览共 ${sibs.length} 张,逐张 Read 走的是最慢的路。改用一次性批量更省时(每批 ≤6 张):\n  node C:/Users/王子轩/.claude/skills/qwen-dual-model/scripts/qwen_vision.mjs <图1> <图2> … "逐张检查:文字溢出/遮挡、对齐、配图占比"`;
+    }
+  } catch {}
+  return '';
+}
 
 function log(entry) {
   try {
@@ -70,15 +96,47 @@ async function main() {
   }
   if (!IMAGE_EXTS.has(ext)) return console.log('{}');
 
+  const t0 = Date.now();
   try {
-    const content = [imageBlock(abs), { type: 'text', text: VISION_PROMPT }];
-    // 超时必须收紧:这段跑在 PreToolUse 里,**整个会话都在等它**。
-    // 用默认值(240s × 3 次尝试)最坏会卡住约 12 分钟 —— 直接违反"绝不卡住主会话"这条设计承诺。
-    // 单次 90s、不重试:够慢调用跑完(视觉调用实测 10~70s+);真超时就 fail-open 交给原生 Read,
-    // 而 Flash 有原生视觉,这条退路的代价很低。
-    const result = await callQwen([{ role: 'user', content }], { timeoutMs: TIMEOUTS.hook, retries: 0 });
-    log({ level: 'ROUTED', kind: 'image', target: abs, bytes: fs.statSync(abs).size });
-    deny(`🖼️ 图片已由 Qwen 自动读取,内容如下(无需再 Read 该图片):\n\n${result}`);
+    const prompt = hookPrompt(abs);
+    const hint = batchHint(abs);
+
+    // 缓存命中:相同文件内容 + 相同 prompt → 直接复用,省一次 Qwen 调用(节省 ~40s)
+    const cached = visionCacheGet(abs, prompt);
+    if (cached) {
+      log({ level: 'CACHE_HIT', kind: 'image', target: abs });
+      return deny(`🖼️ 图片已由 Qwen 自动读取(缓存)，内容如下(无需再 Read 该图片):${hint}\n\n${cached}`);
+    }
+
+    const stat = fs.statSync(abs);
+    const content = [imageBlock(abs), { type: 'text', text: prompt }];
+
+    // hook 内超时与超时策略:
+    //   旧版 90s 单次 → 切在实测 p90=61s 的尾部(本批 45 次里失败 2 次均 90.01s 超时)。
+    //   新版 120s 单次 + 1 次仅超时重试:给尾部 ~10% 的慢调用留足余量;重试只对 AbortError
+    //   触发,不对 API 错误触发(以免两倍惩罚已限流的情况)。
+    //   max_tokens 500:配合精简 prompt 把生成量从旧 1-2k 字压到 ~500 token,既省上下文又省时延。
+    let result;
+    for (let i = 0; i <= 1; i++) {
+      try {
+        result = await callQwen([{ role: 'user', content }], {
+          timeoutMs: TIMEOUTS.hook,   // 120s(见 qwen_common.mjs TIMEOUTS.hook)
+          retries: 0,                  // 重试由此循环控制,避免双重重试逻辑
+          maxTokens: HOOK_MAX_TOKENS,  // 500 token 上限
+        });
+        break;
+      } catch (retryErr) {
+        if (i === 0 && /超时|AbortError|timeout/i.test(retryErr.message)) {
+          log({ level: 'HOOK_RETRY', kind: 'image', target: abs, attempt: 1, error: retryErr.message.slice(0, 80) });
+          continue;
+        }
+        throw retryErr;
+      }
+    }
+    const durationMs = Date.now() - t0;
+    visionCacheSet(abs, prompt, result);
+    log({ level: 'ROUTED', kind: 'image', target: abs, bytes: stat.size, durationMs });
+    deny(`🖼️ 图片已由 Qwen 自动读取，内容如下(无需再 Read 该图片):${hint}\n\n${result}`);
   } catch (e) {
     // fail-open:外挂故障时放行 Read,绝不卡住主会话。但**不能静默** ——
     // 协议要求主模型"在回复里说明本次未走 Qwen",而在此之前它根本不知道发生过 fail-open,
@@ -97,7 +155,15 @@ async function main() {
         + `本次视觉**未执行**:不要假装看到了图,请明确告知用户,`
         + `并建议重跑 qwen_vision,或用 DEEPSEEK_MODEL=deepseek-flash 换到有原生视觉的档。`
         + `失败原因:${why}`;
-    log({ level: 'FALLBACK', kind: 'image', target: abs, error: e.message, driverVisionCapable: capable });
+    // P2:补 bytes/durationMs — 方便事后区分"是不是图太大/太慢导致的失败"
+    const fallbackStat = (() => { try { return fs.statSync(abs); } catch { return null; } })();
+    log({
+      level: 'FALLBACK', kind: 'image', target: abs,
+      bytes: fallbackStat?.size ?? null,
+      durationMs: Date.now() - t0,
+      error: e.message,
+      driverVisionCapable: capable,
+    });
     console.error(note);   // 用户侧可见
     console.log(JSON.stringify({
       hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: note },

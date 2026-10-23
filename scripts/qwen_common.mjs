@@ -8,6 +8,7 @@
 //   - **档位按 mode 分**(PROVIDERS.modeModels):翻转只决定"哪家厂商",mode 决定"该厂商的哪一档"。
 //     依据是跑分:DeepSeek 侧 Flash 赢代码/agent、Pro 赢知识/推理,不该"纯文本一律 pro"
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,7 @@ export const CC_SWITCH_DB = path.join(CC_DIR, 'cc-switch.db');
 export const TIMEOUTS = {
   nonStream: 240_000,   // 非流式(视觉等):视觉调用方差大(实测 10~70s+),留足余量
   stream:    900_000,   // 流式长生成(评审/咨询):实测 214~609s 不等,单次上限留冗余
-  hook:       90_000,   // hook 内(PreToolUse):超时即 fail-open,不重试
+  hook:      120_000,   // hook 内(PreToolUse):单次 120s(旧 90s 切在 p90=61s 尾部;流式下首 token 约 2s,误杀率低)
 };
 
 /**
@@ -336,7 +337,7 @@ async function readSSE(body) {
  * returnMeta 返回 { content, model } 而非纯字符串;model 取自响应体回显,
  *            是识别"别名/重定向"的唯一可靠手段(见 self_test.mjs 溯源探针)
  */
-export async function callModel(messages, { provider = 'bailian', model, mode = '', timeoutMs, retries = 2, returnMeta = false, stream = false } = {}) {
+export async function callModel(messages, { provider = 'bailian', model, mode = '', timeoutMs, retries = 2, returnMeta = false, stream = false, maxTokens } = {}) {
   if (!PROVIDERS[provider]) throw new Error(`未知 provider: ${provider}`);
   if (timeoutMs == null) timeoutMs = stream ? TIMEOUTS.stream : TIMEOUTS.nonStream;
   const t0 = Date.now();
@@ -354,7 +355,11 @@ export async function callModel(messages, { provider = 'bailian', model, mode = 
         method: 'POST',
         signal: controller.signal,
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: useModel, messages, ...(stream ? { stream: true } : {}) }),
+        body: JSON.stringify({
+          model: useModel, messages,
+          ...(stream ? { stream: true } : {}),
+          ...(maxTokens ? { max_tokens: maxTokens } : {}),
+        }),
       });
       if (!firstByteMs) firstByteMs = Date.now() - t0;
       if (stream) {
@@ -436,7 +441,44 @@ export function readTextCapped(filePath, maxBytes = MAX_TEXT_BYTES) {
   return buf.toString('utf8');
 }
 
-// ───────────────── 领域自动推断(--context 缺省时的兜底) ─────────────────
+// ───────────────── 视觉缓存(按 sha1+prompt 去重,节省重复读图) ─────────────────
+const VISION_CACHE_DIR = path.join(LOG_DIR, 'vision-cache');
+
+/** 生成缓存 key:sha1(文件内容) + sha1(prompt 前 200 字) */
+function visionCacheKey(absPath, prompt = '') {
+  try {
+    const fileBuf = fs.readFileSync(absPath);
+    const fileHash = createHash('sha1').update(fileBuf).digest('hex').slice(0, 12);
+    const promptHash = createHash('sha1').update(String(prompt).slice(0, 200)).digest('hex').slice(0, 8);
+    return `${fileHash}-${promptHash}`;
+  } catch { return null; }
+}
+
+/**
+ * 读视觉缓存。
+ * @returns {string|null} 命中时返回缓存内容,否则 null
+ */
+export function visionCacheGet(absPath, prompt = '') {
+  const key = visionCacheKey(absPath, prompt);
+  if (!key) return null;
+  try {
+    const p = path.join(VISION_CACHE_DIR, `${key}.txt`);
+    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
+  } catch {}
+  return null;
+}
+
+/**
+ * 写视觉缓存。fail-safe:写失败不影响主流程。
+ */
+export function visionCacheSet(absPath, prompt = '', content = '') {
+  const key = visionCacheKey(absPath, prompt);
+  if (!key) return;
+  try {
+    if (!fs.existsSync(VISION_CACHE_DIR)) fs.mkdirSync(VISION_CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(VISION_CACHE_DIR, `${key}.txt`), content, 'utf8');
+  } catch {}
+}
 // 背景:`--context` 是本 skill 里最影响评审质量的参数 —— 同一个 mode,判据贴不贴领域,
 // 出来的意见完全不同。但它没有自然语言入口(见 USAGE.md §三.5),于是绝大多数评审
 // 是按通用标准判的。这里补一个**纯文件 I/O** 的推断:不联网、不调模型、不递归扫目录

@@ -253,15 +253,18 @@ node <skill>/scripts/show_calls.mjs [N] [--errors]
    **实测:`deepseek-flash`(V4.1-Flash)已有原生视觉**——能读折线图异常点、能把排版公式准确转成 LaTeX。
    放行后主模型确实读得了图,这条路比"放弃视觉"强得多。
    (注意 `deepseek-v4-pro` 是**纯文本**档,只有 `flash` 能看图。)
-   需要主动使用原生视觉时,直接 `Read` 并说明"本次不走 Qwen"即可,不要绕脚本。
+   需要主动绕过 Qwen 走原生视觉时,用环境变量开关:`DRIVER_PROVIDER=bailian node … ` 或在当次会话 shell 里 `export DRIVER_PROVIDER=bailian`——hook 检测到驱动方是 bailian 时整体让行,原生 Read 即可生效。
+   注:hook 当前通过读 CC Switch 数据库判断驱动方,而不解析对话文本,所以"在消息里说明本次不走 Qwen"对 hook 无效。
+   **设置完成后记得 `unset DRIVER_PROVIDER`** 以恢复协议。
    **fail-open 不再静默**(2026-09-29 起):放行时 hook 会用 `hookSpecificOutput.additionalContext`
    把"本次读图未走 Qwen,请在回复中说明"送进模型上下文 —— 在此之前主模型根本不知道发生过 fail-open,
    所以"在回复里说明"这条协议从来没真正执行过。若驱动档是纯文本档,hook 会改口明说
    "本次视觉未执行,不要假装看到了图"。日志仍记 `FALLBACK`,并加 `driverVisionCapable` 字段标明当次判断。
-   **hook 内的超时单独收紧**(2026-10-08 起):单次 90s、**不重试** —— 三档超时统一在
-   `qwen_common.mjs` 的 `TIMEOUTS` 里(视觉/非流式 240s × 最多 3 次尝试、评审/咨询流式 900s 单次、
-   hook 90s 单次)。普通脚本调用最坏能等十几分钟,但 hook 是**阻塞主会话**的,不能按那个尺度等 ——
-   90s 超时即走上面的 fail-open。
+   **hook 内的超时单独收紧**(2026-10-08 起,2026-10-21 更新):单次 **120s**、**超时重试 1 次** ——
+   三档超时统一在 `qwen_common.mjs` 的 `TIMEOUTS` 里(视觉/非流式 240s × 最多 3 次尝试、评审/咨询流式 900s 单次、
+   hook 120s 单次超时可重试 1 次)。旧版 90s 切在实测 p90=61s 的尾部(本批 45 次里失败 2 次均 90.01s 超时),
+   120s 覆盖尾部分布;超时时重试 1 次避免偶发慢调用直接 fail-open;真超两次就 fail-open。
+   普通脚本调用最坏能等十几分钟,但 hook 是**阻塞主会话**的,不能按那个尺度等。
 3. 图片结论与代码输出矛盾时,以代码实际输出为准,让 Qwen 再确认一次
 4. 绝不因为外挂故障停止主线推理;绝不编造"Qwen 说…"的内容——没跑成功的调用,结果不存在
 
