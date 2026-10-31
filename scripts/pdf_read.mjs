@@ -128,12 +128,58 @@ open(os.environ['TXTPATH'], 'w', encoding='utf-8').write(
     console.log(textOk ? `📄 文字已提取: ${txtPath}(用 Read 读它即可)` : '⚠️ 文字提取失败,该 PDF 可能为扫描件,建议走 Qwen 会话 Read');
   }
 
+  // 文字层质量抽查:CID/子集字体缺 ToUnicode 时,中文会被抽成空白或零散英文,
+  // 但"有文字层"的覆盖率仍显示 100% —— 覆盖率报表给了假安全感。
+  // 2026-10-30 实测:某中文 PDF 2/2 页"有文字层",抽出的只有 "OPPO SDK" 等零散英文,
+  // 中文全部丢失,结果多花一轮 OCR。这里按"每页有效字符数"兜底提示。
+  let textLayerSuspicious = false;
+  if (textOk && pageChars.length) {
+    try {
+      const raw = fs.readFileSync(txtPath, 'utf8');
+      const nonWs = (raw.match(/\S/g) || []).length;
+      const cjk = (raw.match(/[一-鿿]/g) || []).length;
+      const bad = (raw.match(/�/g) || []).length;
+      const perPage = Math.round(nonWs / pageChars.length);
+
+      // 字体侧证据:CJK 字体存在、但抽出的中文为 0 → 基本可判定为 CID 缺 ToUnicode。
+      // pdfplumber 不可用时静默跳过,退回"每页字符数"单指标。
+      let cjkFonts = [];
+      try {
+        const out = py(`
+import pdfplumber, os, json
+pdf = pdfplumber.open(os.environ['PDFPATH'])
+fonts = set()
+for p in pdf.pages[:3]:
+    for ch in (p.chars or []):
+        n = (ch.get('fontname') or '').lower()
+        if any(k in n for k in ('cjk','song','sun','hei','kai','ming','noto','han','stsong','simsun','fang')):
+            fonts.add(n)
+print(json.dumps(sorted(fonts)))
+`);
+        cjkFonts = JSON.parse(out.trim() || '[]');
+      } catch {}
+
+      const suspicious = bad > 0
+        || (cjkFonts.length > 0 && cjk === 0)
+        || perPage < 40;
+      textLayerSuspicious = suspicious;
+      if (suspicious) {
+        console.log(`⚠️ 文字层疑似不可用:平均每页 ${perPage} 个有效字符,中文 ${cjk} 字`
+          + (cjkFonts.length ? `,检出 CJK 字体 ${cjkFonts.length} 种` : '')
+          + (bad ? `,替换符 ${bad} 个` : '') + '。'
+          + '常见原因是 CID/子集字体缺 ToUnicode 映射。建议改用 --ocr(逐页视觉识别)。');
+      }
+    } catch {}
+  }
+
   // 路由结论必须打出来:本次任务里"图内英文没进译文"的根因就是这条口径没说清。
   if (noImages) {
     console.log('ℹ️  --no-images:只做本地文本层抽取,零 API 成本。'
-      + (blankPages.length
-        ? `注意第 ${blankPages.join(', ')} 页没有文字层,那里的内容**不在**这份 txt 里,需要 --ocr 或 qwen_vision。`
-        : '全部页面都有文字层,可直接用这份 txt。'));
+      + (textLayerSuspicious
+        ? '⚠️ 但文字层质量存疑(见上方警告),这份 txt 可能大面积缺字,建议改用 --ocr。'
+        : blankPages.length
+          ? `注意第 ${blankPages.join(', ')} 页没有文字层,那里的内容**不在**这份 txt 里,需要 --ocr 或 qwen_vision。`
+          : '全部页面都有文字层,可直接用这份 txt。'));
     return;
   }
 
@@ -224,7 +270,11 @@ page.render(scale=${(dpi / 72).toFixed(3)}).to_pil().save(os.environ['PNGPATH'])
 - 只输出页面上真实存在的文字;看不清的地方写 [无法辨认],不要猜测补全。`
         : `这是 PDF 第 ${p} 页。详细描述这一页的全部图和表格:结构、坐标轴含义、数值、趋势、异常点、公式。信息尽量完整准确,供后续推理使用。`);
       try {
-        const ans = await callQwen([{ role: 'user', content: [imageBlock(png), { type: 'text', text: q }] }]);
+        const ans = await callQwen([{ role: 'user', content: [imageBlock(png), { type: 'text', text: q }] }], {
+          // 逐字 OCR 是纯提取任务,思考链只会把 2s 拖成 100s+;输出上限防止整页复述跑飞。
+          enableThinking: false,
+          maxTokens: 4096,
+        });
         console.log(`\n===== 第 ${p} 页(${ocr ? 'OCR' : '图'})=====\n${ans}`);
       } catch (e) {
         // 视觉失败**不能静默**:这一页的文字就是没拿到,下游若当成"该页无内容"就会漏。

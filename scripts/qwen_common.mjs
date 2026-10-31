@@ -23,7 +23,7 @@ export const CC_SWITCH_DB = path.join(CC_DIR, 'cc-switch.db');
 // 散落在各处的超时参数现在统一从这里引用,避免改一处漏另一处。
 // hook 内单独收紧(单次不重试),原因见 qwen_read_hook.mjs 注释。
 export const TIMEOUTS = {
-  nonStream: 240_000,   // 非流式(视觉等):视觉调用方差大(实测 10~70s+),留足余量
+  nonStream: 240_000,   // 非流式(视觉等):思考关(视觉默认)约 2~10s;思考开实测 60~240s,240s 仅作安全网
   stream:    900_000,   // 流式长生成(评审/咨询):实测 214~609s 不等,单次上限留冗余
   hook:      120_000,   // hook 内(PreToolUse):单次 120s(旧 90s 切在 p90=61s 尾部;流式下首 token 约 2s,误杀率低)
   retrySlack: 120_000,  // 单次超时之外留给"重试"的总预算余量(见 callModel 的 budgetMs)
@@ -313,6 +313,15 @@ function isRetryableStatus(status) {
 const STREAM_USAGE_UNSUPPORTED = new Set();
 
 /**
+ * 不支持 enable_thinking 的 provider(思考模式开关的降级开关)。
+ * 2026-10-30 实测:qwen3.8-max 在默认(思考开)下,视觉调用会生成
+ * 3000–9500 个 reasoning token,单次 60–240s;显式 enable_thinking:false 后
+ * 同一张图 2.1s、2 个 token 返回,质量无损。故视觉通道默认关闭思考。
+ * 若某网关不认这个字段(400/422 unknown parameter),记下来并重试,不消耗重试次数。
+ */
+const THINKING_UNSUPPORTED = new Set();
+
+/**
  * 读取 OpenAI 兼容 SSE 流(stream:true),把 delta.content 拼成完整正文。
  * 长生成(评审/咨询)走流式的意义:非流式要等整个响应生成完毕才吐第一个字节,
  * 会撞上 node 内置 fetch(undici)隐藏的 headersTimeout 300s —— 表现为"卡死零输出、
@@ -401,6 +410,9 @@ async function readSSE(body) {
 export async function callModel(messages, {
   provider = 'bailian', model, mode = '', timeoutMs, retries = 2,
   returnMeta = false, stream = false, maxTokens, budgetMs, allowPartial = false,
+  // 仅 Qwen3 系:显式 true/false 控制思考模式;不传 = 用服务端默认(思考开)。
+  // 视觉/OCR 调用务必传 false —— 思考链会吃掉 60–240s,而答案本身只需 2s。
+  enableThinking,
 } = {}) {
   if (!PROVIDERS[provider]) throw new Error(`未知 provider: ${provider}`);
   if (timeoutMs == null) timeoutMs = stream ? TIMEOUTS.stream : TIMEOUTS.nonStream;
@@ -423,6 +435,16 @@ export async function callModel(messages, {
     return true;
   }
 
+  // 非流式调用没有首字节回调,必须自己打心跳 —— 否则 60–240s 的等待在终端里就是"卡死"。
+  let hbTimer = null;
+  if (!stream) {
+    const hbStart = Date.now();
+    hbTimer = setInterval(() => {
+      process.stderr.write(`⏳ ${PROVIDERS[provider].label} ${useModel} 已等待 ${Math.round((Date.now() - hbStart) / 1000)}s...\n`);
+    }, 10000);
+    if (hbTimer.unref) hbTimer.unref();
+  }
+  try {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const remaining = deadline - Date.now();
     if (remaining < 5000) {
@@ -446,6 +468,8 @@ export async function callModel(messages, {
           ...(stream ? { stream: true } : {}),
           ...(stream && !STREAM_USAGE_UNSUPPORTED.has(provider) ? { stream_options: { include_usage: true } } : {}),
           ...(maxTokens ? { max_tokens: maxTokens } : {}),
+          ...(enableThinking !== undefined && !THINKING_UNSUPPORTED.has(provider)
+            ? { enable_thinking: enableThinking } : {}),
         }),
       });
       if (!firstByteMs) firstByteMs = Date.now() - t0;
@@ -460,6 +484,14 @@ export async function callModel(messages, {
               process.stderr.write(`ℹ️  ${PROVIDERS[provider].label} 不支持 stream_options,已关闭流式用量统计(费用列将显示 -)\n`);
             }
             attempt--;          // 这次不算数:不是模型的错,也不该消耗重试次数
+            continue;
+          }
+          if ((res.status === 400 || res.status === 422)
+              && enableThinking !== undefined && !THINKING_UNSUPPORTED.has(provider)
+              && /enable_thinking|unknown (field|parameter)|unrecognized/i.test(JSON.stringify(j))) {
+            THINKING_UNSUPPORTED.add(provider);
+            process.stderr.write(`ℹ️  ${PROVIDERS[provider].label} 不支持 enable_thinking,已关闭该字段\n`);
+            attempt--;
             continue;
           }
           lastErr = classifyError(res.status, j, provider);
@@ -520,6 +552,15 @@ export async function callModel(messages, {
           reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens, budgetMs });
         return returnMeta ? { content, model: j.model || useModel, partial: false, usage } : content;
       }
+      // enable_thinking 被网关拒绝:记下来,去掉该字段重试(不消耗重试次数)
+      if ((res.status === 400 || res.status === 422)
+          && enableThinking !== undefined && !THINKING_UNSUPPORTED.has(provider)
+          && /enable_thinking|unknown (field|parameter)|unrecognized/i.test(JSON.stringify(j))) {
+        THINKING_UNSUPPORTED.add(provider);
+        process.stderr.write(`ℹ️  ${PROVIDERS[provider].label} 不支持 enable_thinking,已关闭该字段\n`);
+        attempt--;
+        continue;
+      }
       lastErr = classifyError(res.status, j, provider);
       if (isRetryableStatus(res.status)) { if (attempt < retries) { if (!await backoff(attempt)) break; } continue; }
       break; // 401/403/model/402 重试无意义
@@ -539,6 +580,9 @@ export async function callModel(messages, {
   appendCallLog({ provider, model: useModel, mode, stream, ok: false, durationMs: Date.now() - t0, firstByteMs,
     budgetMs, error: lastErr.slice(0, 120) });
   throw new Error(`${PROVIDERS[provider].label} 调用失败(已尝试 ${attemptsMade} 次): ${lastErr}`);
+  } finally {
+    if (hbTimer) clearInterval(hbTimer);
+  }
 }
 
 /**
@@ -611,6 +655,39 @@ export function visionCacheGet(absPath, prompt = '') {
  */
 export function visionCacheSet(absPath, prompt = '', content = '') {
   const key = visionCacheKey(absPath, prompt);
+  if (!key) return;
+  try {
+    if (!fs.existsSync(VISION_CACHE_DIR)) fs.mkdirSync(VISION_CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(VISION_CACHE_DIR, `${key}.txt`), content, 'utf8');
+  } catch {}
+}
+
+/**
+ * 多图缓存 key:所有图片内容**按传入顺序**哈希 + prompt 前 200 字。
+ * 单图时与 visionCacheKey 完全同键(同一个 SHA1 输入),可直接复用旧缓存。
+ */
+function visionCacheKeyMany(absPaths, prompt = '') {
+  try {
+    const h = createHash('sha1');
+    for (const p of absPaths) h.update(fs.readFileSync(p));
+    const fileHash = h.digest('hex').slice(0, 12);
+    const promptHash = createHash('sha1').update(String(prompt).slice(0, 200)).digest('hex').slice(0, 8);
+    return `${fileHash}-${promptHash}`;
+  } catch { return null; }
+}
+
+export function visionCacheGetMany(absPaths, prompt = '') {
+  const key = visionCacheKeyMany(absPaths, prompt);
+  if (!key) return null;
+  try {
+    const p = path.join(VISION_CACHE_DIR, `${key}.txt`);
+    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
+  } catch {}
+  return null;
+}
+
+export function visionCacheSetMany(absPaths, prompt = '', content = '') {
+  const key = visionCacheKeyMany(absPaths, prompt);
   if (!key) return;
   try {
     if (!fs.existsSync(VISION_CACHE_DIR)) fs.mkdirSync(VISION_CACHE_DIR, { recursive: true });

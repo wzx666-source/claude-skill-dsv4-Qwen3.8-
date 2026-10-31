@@ -43,6 +43,11 @@ node $S/qwen_vision.mjs 图.png "检查坐标轴刻度和异常点"
 node $S/qwen_vision.mjs a.png b.png "哪张趋势异常?为什么?"
 node $S/qwen_vision.mjs 手写.jpg "把推导逐行转成 LaTeX"
 
+# 视觉默认关闭思考链(单图约 2s)。只有"看图做复杂推理"才加 --think;
+# OCR/排版/找异常点这类任务不要开 —— 思考模式下单次 60–240s。
+node $S/qwen_vision.mjs --think 复杂图表.png "这张图的论证结构有什么问题?"
+node $S/qwen_vision.mjs --max-tokens 1024 --no-cache 图.png "只列标题"
+
 # ── 评审:常规过一遍
 node $S/qwen_review.mjs review src/cache.py
 

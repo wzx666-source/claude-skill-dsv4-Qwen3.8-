@@ -123,6 +123,7 @@ async function main() {
           timeoutMs: TIMEOUTS.hook,   // 120s(见 qwen_common.mjs TIMEOUTS.hook)
           retries: 0,                  // 重试由此循环控制,避免双重重试逻辑
           maxTokens: HOOK_MAX_TOKENS,  // 500 token 上限
+          enableThinking: false,       // 读图转述不需要思考链:开着的实测代价是 60–240s vs 2s
         });
         break;
       } catch (retryErr) {

@@ -114,11 +114,16 @@ try {
 // 10. Qwen 视觉调用
 if (madePng) {
   try {
+    const tv = Date.now();
     const v = await callQwen([{ role: 'user', content: [
       imageBlock(testPng),
       { type: 'text', text: '这张图是什么颜色?只回答颜色' },
-    ] }]);
-    check('Qwen 视觉调用', /红|red/i.test(v), JSON.stringify(v).slice(0, 60));
+    ] }], { enableThinking: false, maxTokens: 256 });
+    const ms = Date.now() - tv;
+    check('Qwen 视觉调用', /红|red/i.test(v), `${JSON.stringify(v).slice(0, 60)}｜${ms}ms`);
+    // 回归护栏:思考关掉后应是秒级。若这里 >30s,说明 enable_thinking 没生效
+    // (或网关默默忽略了该字段),而不是"网络慢"——别再用加超时来掩盖。
+    check('视觉时延(思考关)< 30s', ms < 30000, `${ms}ms`);
   } catch (e) {
     check('Qwen 视觉调用', false, e.message);
   }
