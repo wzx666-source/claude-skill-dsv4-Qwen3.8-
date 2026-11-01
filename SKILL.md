@@ -42,6 +42,13 @@ allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 > 输出 token 花在 reasoning 上。仅"看图做复杂推理"时加 `--think`;OCR/排版检查不要开。
 > 输出上限默认 4096(`--max-tokens N` 可调),相同图片+问题会命中视觉缓存(`--no-cache` 跳过)。
 
+> **评审默认也关思考链(仅 Qwen 当评审方时)**:2026-11-01 A/B(一份植入缺陷的材料,每组 n=3)——
+> review 148s→12s、recompute 97s→17s、challenge 219s→25s,抓出的真缺陷数相当或略少(4 个植入缺陷:思考开 4/4/4、关 3/4/3;端到端实测另见 1 次诱饵误报,`lowerBound` 的 `>>1` 被判【中】)。思考开列出的条目约多一倍,多出的部分未逐条核验。
+> 这是方向性证据,不是定论。**疑难/定稿前加 `--think` 深审**;`qwen_ask`(难题会诊)不改,仍开思考;DeepSeek 做评审方时保持默认(实测约 44s)。
+> **思考开关的字段名因厂商而异**:Qwen 用 `enable_thinking`,DeepSeek 用 `thinking:{type:'disabled'}`;
+> 发错字段不报错、只被静默忽略(DeepSeek 收到 `enable_thinking:false` 返回 200 却照常思考),见 `qwen_common.mjs` 的 `thinkingBody`。
+> **评审原文默认带行号**(`行号| 内容`),提示词要求「指到具体行号」,不带行号模型只能自己数;`--no-lines` 可关(A/B 对照用)。
+
 > ⚠️ **PDF 不是一个动作,是两类**:正文走本地文本层(免费、快、能覆盖全文);
 > 图内文字/扫描页才走视觉(按页计费)。**不要把整本 PDF 丢给视觉** —— 既慢又贵,
 > 还会漏掉它没"注意"到的正文。反过来只做文本层就会漏掉图里的英文(166 页翻译任务的实况)。
@@ -227,11 +234,11 @@ node <skill>/scripts/pdf_read.mjs <pdf> [--pages 1-3] [--max-img-pages 4] ["图�
 
 # 评审:四模式,评审方自动翻转(--json 出结构化结果;issues 仅 review/latex 有值)
 node <skill>/scripts/qwen_review.mjs review|challenge|recompute|latex <文件...> \
-     [--focus "本轮关注点"] [--context "领域背景"] [--json] [--budget 秒]
+     [--focus "本轮关注点"] [--context "领域背景"] [--json] [--budget 秒] [--think|--no-think] [--no-lines]
 
 # 自由咨询:会诊/头脑风暴/第二意见,咨询方自动翻转
 node <skill>/scripts/qwen_ask.mjs "<问题>" [--file <附件>...] \
-     [--max-tokens N] [--timeout 秒] [--budget 秒]
+     [--max-tokens N] [--timeout 秒] [--budget 秒] [--think|--no-think]
 
 # 批量任务开跑前预检(2 秒,两家各一次极短调用;402/401 提前暴露)
 node <skill>/scripts/canary.mjs [--json] [--provider bailian|deepseek|both] [--budget 秒]

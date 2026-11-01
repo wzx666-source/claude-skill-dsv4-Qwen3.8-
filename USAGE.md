@@ -63,6 +63,9 @@ node $S/qwen_review.mjs recompute 数据.csv 结论.md
 # ── 指定本轮关注点
 node $S/qwen_review.mjs review api.py --focus "并发安全" --context "FastAPI 服务"
 
+# ── 思考链开关:Qwen 评审默认关(约 8–25s);疑难/定稿前加 --think 深审(约 80–220s)
+node $S/qwen_review.mjs challenge design.md --think
+
 # ── 会诊:卡住的问题 + 附属文件
 node $S/qwen_ask.mjs "这个死锁怎么排查" --file worker.py
 
@@ -414,6 +417,8 @@ cat ~/.claude/hooks-logs/$(date +%F).jsonl
 - Qwen 视觉挂掉时,hook 会放行原生 `Read`;`deepseek-flash` 有原生视觉,可直接读图(在回复里说明本次未走 Qwen)
 - **"怎么这么慢"先看日志再猜**:`node $S/show_calls.mjs --errors` 看失败条目,
   `show_calls.mjs` 看耗时/首字节 —— 首字节慢是服务端排队,总耗时慢才是生成慢,处置方式不同
+- **评审/咨询慢:先看 stderr 的 `🧠 思考链` 那一行**。Qwen 开着思考链时评审要 80–220s,关掉约 8–25s(2026-11-01 A/B,n=3,方向性证据;关思考时召回略低、偶有挑剔性误报,**定稿前建议加 `--think`**);
+  所以 `qwen_review` 在 Qwen 当评审方时默认关思考,要深审显式 `--think`。`qwen_ask` 是难题会诊,默认仍开思考,嫌慢可加 `--no-think`
 - **"花了多少"看 `--cost`**:`node $S/show_calls.mjs --cost` 按厂商/模型汇总 token 与估算费用;
   若显示"另有 N 条未计量",那部分是 2026-10-23 之前的老日志,没有 usage 记录
 - **余额不足(402)**:报错会直接说去哪充值。批量任务开跑前先 `node $S/canary.mjs`(2 秒)

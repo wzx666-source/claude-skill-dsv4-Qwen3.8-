@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   callQwen, callModel, callReviewer, loadKey, imageBlock, CC_SWITCH_DB,
   activeProviderName, peerProviderName, reviewerMeta, pickModel, PROVIDERS,
-  MODEL_ALIAS_PROBE, resolvedTiers, TIMEOUTS, classifyError,
+  MODEL_ALIAS_PROBE, resolvedTiers, TIMEOUTS, classifyError, withLineNumbers, thinkingBody,
 } from './qwen_common.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -347,6 +347,35 @@ try {
     r.usage ? `in ${r.usage.prompt_tokens} / out ${r.usage.completion_tokens}` : '未返回 usage(费用列将显示 -)');
 } catch (e) {
   check('usage 采集(流式)', false, e.message.slice(0, 80));
+}
+
+// 24. 行号注入(纯函数,零 token):评审提示词要求「指到具体行号」,原文不带行号模型只能自己数
+{
+  const ls = withLineNumbers('a\nb\r\nc').split('\n');
+  check('行号注入:逐行编号且兼容 CRLF', ls.length === 3 && ls[0] === '1| a' && ls[1] === '2| b' && ls[2] === '3| c', JSON.stringify(ls));
+  const wide = withLineNumbers(Array.from({ length: 10 }, (_, i) => 'x' + i).join('\n')).split('\n');
+  check('行号注入:≥10 行时按宽度对齐', wide[0] === ' 1| x0' && wide[9] === '10| x9', JSON.stringify([wide[0], wide[9]]));
+}
+
+// 25. --think/--no-think/--no-lines 必须被摘掉,不能漏进文件名/问题(不耗 token:只走报错路径)
+{
+  const run = (script, args) => spawnSync(process.execPath, [path.join(__dirname, script), ...args], { encoding: 'utf8' });
+  const r1 = run('qwen_review.mjs', ['review', '--no-think', '--no-lines', 'no_such_file.md']);
+  const e1 = (r1.stderr || '') + (r1.stdout || '');
+  check('qwen_review:--no-think/--no-lines 不被当成文件名', /no_such_file\.md/.test(e1) && !/--no-think|--no-lines/.test(e1), e1.split('\n')[0].slice(0, 60));
+  const r2 = run('qwen_ask.mjs', ['--no-think', '--file', 'no_such_file.md']);
+  const e2 = (r2.stderr || '') + (r2.stdout || '');
+  check('qwen_ask:--no-think 被摘掉(只剩空问题 → 报用法)', r2.status !== 0 && /用法/.test(e2), e2.split('\n')[0].slice(0, 60));
+}
+
+// 26. 思考开关的请求体必须按厂商分发(纯函数,零 token):DeepSeek 不认 enable_thinking,
+//     发过去返回 200 却照常思考 —— 这种「静默无效」只能靠断言字段名抓住
+{
+  const q = thinkingBody('bailian', false);
+  const d = thinkingBody('deepseek', false);
+  check('思考开关:Qwen 用 enable_thinking', q.enable_thinking === false && !('thinking' in q), JSON.stringify(q));
+  check('思考开关:DeepSeek 用 thinking.type(不是 enable_thinking)',
+    d.thinking?.type === 'disabled' && !('enable_thinking' in d) && thinkingBody('deepseek', true).thinking.type === 'enabled', JSON.stringify(d));
 }
 
 // 汇总

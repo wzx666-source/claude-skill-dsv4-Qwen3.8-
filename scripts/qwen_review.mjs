@@ -23,7 +23,7 @@
 // --context 补充领域背景,让评审按该领域的规范来判(如 "--context \"Rust 异步运行时,关注 Send/Sync 边界\""、
 //           "--context \"数学建模竞赛论文,关注模型创新性与摘要扣题\"");不给则按通用标准
 import path from 'node:path';
-import { callReviewer, reviewerMeta, readTextCapped, inferDomain, fail, isFatal } from './qwen_common.mjs';
+import { callReviewer, reviewerMeta, readTextCapped, withLineNumbers, inferDomain, fail, isFatal } from './qwen_common.mjs';
 
 const MODES = {
   review: `你是资深评审,独立评审以下产物(代码/推导/文档/论文片段均可)。
@@ -85,6 +85,12 @@ try {
   const budgetRaw = takeOpt('--budget');
   const jsonOut = args.includes('--json');
   if (jsonOut) args.splice(args.indexOf('--json'), 1);
+  // --think / --no-think 显式控制思考链(缺省 = 服务端默认);--no-lines 不给原文加行号(A/B 对照用)
+  const noLines = args.includes('--no-lines');
+  const thinkFlag = args.includes('--think') ? true : args.includes('--no-think') ? false : undefined;
+  for (const f of ['--think', '--no-think', '--no-lines']) {
+    for (let i = args.indexOf(f); i >= 0; i = args.indexOf(f)) args.splice(i, 1);
+  }
   const budgetSec = budgetRaw === '' ? null : Number(budgetRaw);
   if (budgetRaw !== '' && (!Number.isFinite(budgetSec) || budgetSec < 1)) {
     fail(`--budget 应为 ≥1 的秒数,收到: "${budgetRaw}"`);
@@ -101,14 +107,15 @@ try {
 
   const sections = files.map((f, i) => {
     const abs = path.resolve(f);
-    return `===== 文件${i + 1}: ${path.basename(abs)} =====\n${readTextCapped(abs)}`;
+    return `===== 文件${i + 1}: ${path.basename(abs)} =====\n${noLines ? readTextCapped(abs) : withLineNumbers(readTextCapped(abs))}`;
   }).join('\n\n');
   const userText = sections + (focus ? `\n\n【评审关注点】\n${focus}` : '');
   // --context 缺省时自动推断领域(纯文件 I/O)。放在参数校验之后 —— 零参数/报错路径
   // 在上面的 fail() 就终止了,走不到这里,不会拖慢 self_test 的用法检查。
   const effectiveContext = context || inferDomain(files);
   // 领域背景并入 system,让评审按该领域的规范判,而不是泛泛而谈
-  const systemPrompt = MODES[mode] + (effectiveContext ? `\n\n【领域背景(按此领域的规范评审)】\n${effectiveContext}` : '');
+  const lineNote = noLines ? '' : '\n\n【行号约定】材料每行以「行号| 」开头,该前缀不属于材料内容;引用位置时直接使用这些行号。';
+  const systemPrompt = MODES[mode] + lineNote + (effectiveContext ? `\n\n【领域背景(按此领域的规范评审)】\n${effectiveContext}` : '');
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -117,6 +124,9 @@ try {
   const meta = reviewerMeta(messages, { mode });
   console.error(`🔍 评审方: ${meta.label} (${meta.model})｜按 ${mode} 档选模型`
     + `｜驱动方 ${meta.driverLabel} 不参与本次评审`);
+  // 思考链状态必须看得见:默认值随评审方厂商变化(Qwen 关 / DeepSeek 保持服务端默认),不打出来就无从判断这次是快审还是深审
+  const effThink = thinkFlag !== undefined ? thinkFlag : (meta.name === 'bailian' ? false : undefined);
+  console.error(`🧠 思考链: ${effThink === false ? '关(例行评审默认;疑难/定稿前加 --think 深审)' : effThink === true ? '开(--think)' : '服务端默认(开)'}`);
   // 领域来源必须让用户看得见:自动推断的东西不能悄悄生效,否则判据从哪来就说不清了
   if (context) {
     console.error(`🧭 领域(手动指定): ${context.slice(0, 60)}`);
@@ -128,6 +138,7 @@ try {
   if (meta.caveat) console.error(`ℹ️ 存疑: ${meta.caveat}`);
   try {
     const callOpts = { mode };
+    if (thinkFlag !== undefined) callOpts.enableThinking = thinkFlag;
     if (budgetSec != null) callOpts.budgetMs = budgetSec * 1000;
     const raw = await callReviewer(messages, callOpts);
     // 被预算截断:仍输出(半份评审有用),但必须让机器和人都知道它不完整 ——

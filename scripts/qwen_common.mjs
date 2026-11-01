@@ -322,6 +322,18 @@ const STREAM_USAGE_UNSUPPORTED = new Set();
 const THINKING_UNSUPPORTED = new Set();
 
 /**
+ * 各厂商开关思考链的请求体字段 —— 参数名不通用,发错不会报错,只会被静默忽略:
+ *   百炼 Qwen3 系: enable_thinking: bool
+ *   DeepSeek:      thinking: { type: 'enabled' | 'disabled' }
+ * 2026-11-01 实测:DeepSeek 收到 enable_thinking:false 返回 200 却照常思考(v4-pro 仍产出 128 个
+ * reasoning token),只有 thinking:{type:'disabled'} 真正关掉。故必须按 provider 分发。
+ */
+export function thinkingBody(provider, on) {
+  if (provider === 'deepseek') return { thinking: { type: on ? 'enabled' : 'disabled' } };
+  return { enable_thinking: !!on };
+}
+
+/**
  * 读取 OpenAI 兼容 SSE 流(stream:true),把 delta.content 拼成完整正文。
  * 长生成(评审/咨询)走流式的意义:非流式要等整个响应生成完毕才吐第一个字节,
  * 会撞上 node 内置 fetch(undici)隐藏的 headersTimeout 300s —— 表现为"卡死零输出、
@@ -410,7 +422,7 @@ async function readSSE(body) {
 export async function callModel(messages, {
   provider = 'bailian', model, mode = '', timeoutMs, retries = 2,
   returnMeta = false, stream = false, maxTokens, budgetMs, allowPartial = false,
-  // 仅 Qwen3 系:显式 true/false 控制思考模式;不传 = 用服务端默认(思考开)。
+  // 显式 true/false 控制思考模式(字段名因厂商而异,见 thinkingBody);不传 = 用服务端默认(思考开)。
   // 视觉/OCR 调用务必传 false —— 思考链会吃掉 60–240s,而答案本身只需 2s。
   enableThinking,
 } = {}) {
@@ -469,7 +481,7 @@ export async function callModel(messages, {
           ...(stream && !STREAM_USAGE_UNSUPPORTED.has(provider) ? { stream_options: { include_usage: true } } : {}),
           ...(maxTokens ? { max_tokens: maxTokens } : {}),
           ...(enableThinking !== undefined && !THINKING_UNSUPPORTED.has(provider)
-            ? { enable_thinking: enableThinking } : {}),
+            ? thinkingBody(provider, enableThinking) : {}),
         }),
       });
       if (!firstByteMs) firstByteMs = Date.now() - t0;
@@ -608,13 +620,17 @@ export async function callQwen(messages, opts = {}) {
  */
 export async function callReviewer(messages, opts = {}) {
   const provider = peerProviderName();
-  return callModel(messages, { stream: true, allowPartial: true, ...opts, provider });
+  // 例行评审默认关思考:Qwen 开 80–220s / 关 8–25s(2026-11-01 A/B,n=3),抓出的缺陷数相当。
+  // 只对 Qwen 评审方生效 —— DeepSeek 开思考实测仅 ~44s,保持其默认。咨询(无 mode)是难题会诊,保持思考开。
+  // 调用方显式传 enableThinking(--think / --no-think)优先。
+  const enableThinking = provider === 'bailian' && opts.mode ? false : undefined;
+  return callModel(messages, { stream: true, allowPartial: true, enableThinking, ...opts, provider });
 }
 
 /** 读文本文件,超限截断并标注(防止超大文件撑爆请求) */
 export function readTextCapped(filePath, maxBytes = MAX_TEXT_BYTES) {
   const abs = path.resolve(filePath);
-  if (!fs.existsSync(abs)) throw new Error('文件不存在: ' + abs);
+  if (!fs.existsSync(abs)) fail('文件不存在: ' + abs);
   const size = fs.statSync(abs).size;
   const buf = fs.readFileSync(abs);
   if (size > maxBytes) {
@@ -775,6 +791,16 @@ export function imageBlock(absPath, maxBytes = MAX_IMAGE_BYTES) {
   const mime = ext === 'jpg' ? 'jpeg' : ext;
   const b64 = fs.readFileSync(absPath).toString('base64');
   return { type: 'image_url', image_url: { url: `data:image/${mime};base64,${b64}` } };
+}
+
+/**
+ * 给文本逐行加「行号| 」前缀。评审提示词要求「每条问题指到具体行号」,但原文不带行号时
+ * 模型只能自己数行 —— 文件一长就会数偏,表现为引用错位,或整批降级成【低】/「无法定位」。
+ */
+export function withLineNumbers(text) {
+  const lines = String(text).replace(/^﻿/, '').split(/\r?\n/);
+  const w = String(lines.length).length;
+  return lines.map((l, i) => `${String(i + 1).padStart(w)}| ${l}`).join('\n');
 }
 
 class FatalError extends Error {}

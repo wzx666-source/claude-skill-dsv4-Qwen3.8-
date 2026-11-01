@@ -33,6 +33,11 @@ try {
   const maxTokRaw = takeOpt('--max-tokens');
   const timeoutRaw = takeOpt('--timeout');
   const budgetRaw = takeOpt('--budget');
+  // --think / --no-think 显式控制思考链(缺省 = 服务端默认)
+  const thinkFlag = argv.includes('--think') ? true : argv.includes('--no-think') ? false : undefined;
+  for (const f of ['--think', '--no-think']) {
+    for (let i = argv.indexOf(f); i >= 0; i = argv.indexOf(f)) argv.splice(i, 1);
+  }
 
   const num = (v, name) => {
     if (v == null) return null;
@@ -75,6 +80,7 @@ try {
     if (timeoutSec != null) opts.timeoutMs = timeoutSec * 1000;
     if (budgetSec != null) opts.budgetMs = budgetSec * 1000;
     if (maxTokens != null) opts.maxTokens = maxTokens;
+    if (thinkFlag !== undefined) opts.enableThinking = thinkFlag;
     const out = await callReviewer(messages, opts);
     if (/\[⚠️ 流式被截断/.test(out)) {
       console.error('⚠️  本次咨询被预算截断,以上是**部分结论** —— 别当完整答复用。'
